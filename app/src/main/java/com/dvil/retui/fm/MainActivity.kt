@@ -49,7 +49,6 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.View.OnLongClickListener
 import android.view.ViewTreeObserver.OnGlobalLayoutListener
-import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
@@ -67,7 +66,9 @@ import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-import com.dvil.retui.fm.FmVisualInterop.safeInsets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -237,6 +238,8 @@ class MainActivity : Activity() {
     private var systemInsetTop = 0
     private var systemInsetRight = 0
     private var systemInsetBottom = 0
+    private var imeBottomOffset = 0
+    private var imeVisible = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -360,7 +363,6 @@ class MainActivity : Activity() {
         buildCommandDock()
 
         styleUi()
-        installKeyboardInsetWatcher()
     }
 
     private fun resetViewReferencesForRebuild() {
@@ -816,21 +818,6 @@ class MainActivity : Activity() {
         }
         if (alphaRailView != null) alphaRailView!!.invalidate()
         if (pinnedRailView != null) pinnedRailView!!.invalidate()
-    }
-
-    private fun installKeyboardInsetWatcher() {
-        if (stage == null || rootLayoutParams == null) return
-        stage!!.getViewTreeObserver().addOnGlobalLayoutListener(OnGlobalLayoutListener {
-            val visible = Rect()
-            stage!!.getWindowVisibleDisplayFrame(visible)
-            val screenHeight = stage!!.getRootView().getHeight()
-            val keyboardHeight = max(0, screenHeight - visible.bottom)
-            val newBottom = if (keyboardHeight > dp(120)) keyboardHeight + dp(8) else dp(2)
-            if (rootLayoutParams!!.bottomMargin != newBottom) {
-                rootLayoutParams!!.bottomMargin = newBottom
-                root!!.setLayoutParams(rootLayoutParams)
-            }
-        })
     }
 
     private fun runInput(raw: String?) {
@@ -6083,8 +6070,11 @@ class MainActivity : Activity() {
     private fun applyWindowMargins() {
         if (rootLayoutParams == null || root == null) return
         val top = dp(max(0, activeTopMarginDp()))
-        if (rootLayoutParams!!.topMargin != top) {
+        val baseBottom = if (this.imeVisible || imeBottomOffset > 0) 8 else if (this.isLandscapeLayout) 0 else 2
+        val bottom = dp(baseBottom) + imeBottomOffset
+        if (rootLayoutParams!!.topMargin != top || rootLayoutParams!!.bottomMargin != bottom) {
             rootLayoutParams!!.topMargin = top
+            rootLayoutParams!!.bottomMargin = bottom
             root!!.setLayoutParams(rootLayoutParams)
         }
     }
@@ -6129,6 +6119,7 @@ class MainActivity : Activity() {
 
     private fun configureWindow() {
         val window = getWindow()
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         window.setFlags(
             WindowManager.LayoutParams.FLAG_FULLSCREEN,
             WindowManager.LayoutParams.FLAG_FULLSCREEN
@@ -6143,32 +6134,64 @@ class MainActivity : Activity() {
             window.setStatusBarColor(Color.TRANSPARENT)
             window.setNavigationBarColor(Color.BLACK)
         }
+        WindowCompat.getInsetsController(window, window.decorView).run {
+            isAppearanceLightStatusBars = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                isAppearanceLightNavigationBars = false
+            }
+        }
     }
 
     private fun installWindowInsetsHandler() {
         if (stage == null) return
-        stage!!.setOnApplyWindowInsetsListener(View.OnApplyWindowInsetsListener { view: View?, insets: WindowInsets? ->
-            applySystemInsets(insets)
-            insets!!
-        })
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
-            stage!!.requestApplyInsets()
+        ViewCompat.setOnApplyWindowInsetsListener(stage!!) { _, insets: WindowInsetsCompat ->
+            val safeInsets = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            val imeShowing = insets.isVisible(WindowInsetsCompat.Type.ime())
+            val imeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            val keyboardOffset = max(0, imeBottom - safeInsets.bottom)
+            applyWindowInsets(
+                safeInsets.left,
+                safeInsets.top,
+                safeInsets.right,
+                safeInsets.bottom,
+                keyboardOffset,
+                imeShowing
+            )
+            insets
         }
+        ViewCompat.requestApplyInsets(stage!!)
     }
 
-    private fun applySystemInsets(insets: WindowInsets?) {
-        val safe = safeInsets(insets)
-        val left = safe[0]
-        val top = safe[1]
-        val right = safe[2]
-        val bottom = safe[3]
-        if (left == systemInsetLeft && top == systemInsetTop && right == systemInsetRight && bottom == systemInsetBottom) {
+    private fun applyWindowInsets(
+        left: Int,
+        top: Int,
+        right: Int,
+        bottom: Int,
+        keyboardOffset: Int,
+        keyboardVisible: Boolean
+    ) {
+        val safeLeft = max(0, left)
+        val safeTop = max(0, top)
+        val safeRight = max(0, right)
+        val safeBottom = max(0, bottom)
+        val safeKeyboardOffset = max(0, keyboardOffset)
+        if (safeLeft == systemInsetLeft
+            && safeTop == systemInsetTop
+            && safeRight == systemInsetRight
+            && safeBottom == systemInsetBottom
+            && safeKeyboardOffset == imeBottomOffset
+            && keyboardVisible == imeVisible
+        ) {
             return
         }
-        systemInsetLeft = left
-        systemInsetTop = top
-        systemInsetRight = right
-        systemInsetBottom = bottom
+        systemInsetLeft = safeLeft
+        systemInsetTop = safeTop
+        systemInsetRight = safeRight
+        systemInsetBottom = safeBottom
+        imeBottomOffset = safeKeyboardOffset
+        imeVisible = keyboardVisible
         applyStagePadding()
         applyWindowMargins()
     }
