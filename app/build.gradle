@@ -7,6 +7,32 @@ android {
     namespace "com.dvil.retui.fm"
     compileSdk 36
 
+    def keystorePropertiesFile = rootProject.file("local.properties")
+    def keystoreProperties = new Properties()
+    if (keystorePropertiesFile.exists()) {
+        keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+    }
+    def releaseStoreFile = keystoreProperties["storeFile"]
+    def releaseStorePassword = keystoreProperties["storePassword"]
+    def releaseKeyAlias = keystoreProperties["keyAlias"]
+    def releaseKeyPassword = keystoreProperties["keyPassword"]
+    def hasReleaseSigning = releaseStoreFile
+            && releaseStorePassword
+            && releaseKeyAlias
+            && releaseKeyPassword
+            && rootProject.file(releaseStoreFile).exists()
+
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                storeFile rootProject.file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     defaultConfig {
         applicationId "com.dvil.retui.fm"
         minSdk 26
@@ -20,6 +46,9 @@ android {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 
