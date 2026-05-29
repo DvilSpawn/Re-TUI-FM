@@ -8,5 +8,9 @@
         <item name="android:windowBackground">#050605</item>
         <item name="android:navigationBarColor">#171717</item>
         <item name="android:statusBarColor">#171717</item>
+        <item name="android:windowSplashScreenBackground">#050605</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_terminal_blank</item>
+        <item name="android:windowSplashScreenAnimationDuration">0</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
     </style>
 </resources>
