@@ -1,6 +1,12 @@
 # Re:TUI-FM
 
-Re:TUI-FM is a standalone Android file manager for Re:T-UI. It provides a terminal-style file browser with command input, path suggestions, guarded file operations, previews, favorites, and a Re:T-UI-themed cyberdeck interface.
+Re:TUI-FM is a standalone Android file manager for Re:T-UI Launcher. It provides a terminal-style file browser with command input, path suggestions, guarded file operations, previews, favorites, and a Re:T-UI-themed cyberdeck interface.
+
+## Why this exists
+
+- Playstore has strict policies on what permissions a launcher can have, however, the original launcher had the ability to manage files which I wanted to keep. 
+- This launcher is to act as a companion app for the launcher. They shared same UI elements and styles so users who access this app from the launcher dont feel like they opened up a whole different application. 
+- This can also server as a leaning tool for TUI based file management with helpful hints shows right at the application. 
 
 ## Features
 
