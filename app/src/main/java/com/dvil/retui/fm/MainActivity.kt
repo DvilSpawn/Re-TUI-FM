@@ -6124,8 +6124,8 @@ class MainActivity : Activity() {
             WindowManager.LayoutParams.FLAG_FULLSCREEN,
             WindowManager.LayoutParams.FLAG_FULLSCREEN
         )
-        window.clearFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
-        window.setBackgroundDrawable(ColorDrawable(bgColor))
+        window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
+        window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.getAttributes().layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -6202,15 +6202,15 @@ class MainActivity : Activity() {
             try {
                 val provided = Drawable.createFromPath(terminalBackgroundImage)
                 if (provided != null) {
-                    getWindow().setBackgroundDrawable(ColorDrawable(bgColor))
+                    getWindow().setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
                     stage!!.setBackground(provided)
                     return
                 }
             } catch (ignored: Exception) {
             }
         }
-        getWindow().setBackgroundDrawable(ColorDrawable(bgColor))
-        stage!!.setBackgroundColor(bgColor)
+        getWindow().setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        stage!!.setBackgroundColor(Color.TRANSPARENT)
     }
 
     private fun applyCrtOverlay() {
