@@ -562,14 +562,6 @@ class MainActivity : Activity() {
         treePane!!.addView(treeScroll, LinearLayout.LayoutParams(-1, 0, 1f))
         treePane!!.addView(bottomDock, LinearLayout.LayoutParams(-1, -2))
 
-        previewActionsView = LinearLayout(this)
-        previewActionsView!!.setGravity(Gravity.CENTER_VERTICAL)
-        previewActionsView!!.setVisibility(View.GONE)
-        addPreviewAction("SAVE", View.OnClickListener { v: View? -> savePreviewEditor() })
-        val actionsParams = LinearLayout.LayoutParams(-1, dp(30))
-        actionsParams.topMargin = dp(4)
-        bottomDock!!.addView(previewActionsView, actionsParams)
-
         treePaneFrame = buildLandscapePaneFrame(treePane, titleView)
         contentFrame!!.addView(treePaneFrame, LinearLayout.LayoutParams(-1, -1))
     }
@@ -1794,7 +1786,37 @@ class MainActivity : Activity() {
             showTerminalPopup("edit", "edit: supported for text-like files only")
             return
         }
-        showTextEditor(file)
+        openEditor(file)
+    }
+
+    private fun openEditor(file: File) {
+        val intent = Intent(this, FmEditorActivity::class.java)
+        intent.putExtra(EXTRA_PATH, file.getAbsolutePath())
+        intent.putExtra(EXTRA_THEME_BG, bgColor)
+        intent.putExtra(EXTRA_TERMINAL_BG, panelColor)
+        intent.putExtra(EXTRA_THEME_TEXT, textColor)
+        intent.putExtra(EXTRA_THEME_BORDER, borderColor)
+        intent.putExtra(EXTRA_MODULE_BG_COLOR, modulePanelColor)
+        intent.putExtra(EXTRA_MODULE_TEXT_COLOR, moduleTextColor)
+        intent.putExtra(EXTRA_MODULE_BORDER_COLOR, moduleBorderColor)
+        intent.putExtra(EXTRA_MODULE_HEADER_BG_COLOR, headerPanelColor)
+        intent.putExtra(EXTRA_MODULE_HEADER_TEXT_COLOR, headerTextColor)
+        intent.putExtra(EXTRA_MODULE_BUTTON_BG_COLOR, moduleButtonBgColor)
+        intent.putExtra(EXTRA_MODULE_BUTTON_TEXT_COLOR, moduleButtonTextColor)
+        intent.putExtra(EXTRA_MODULE_BUTTON_BORDER_COLOR, moduleButtonBorderColor)
+        intent.putExtra(EXTRA_OUTPUT_BG_COLOR, outputPanelColor)
+        intent.putExtra(EXTRA_OUTPUT_TEXT_COLOR, outputTextColor)
+        intent.putExtra(EXTRA_OUTPUT_BORDER_COLOR, outputBorderColor)
+        intent.putExtra(EXTRA_OUTPUT_TEXT_SIZE, outputTextSizeSp)
+        intent.putExtra(EXTRA_HEADER_TEXT_SIZE, headerTextSizeSp)
+        intent.putExtra(EXTRA_MODULE_CORNER_RADIUS, moduleCornerRadiusDp)
+        intent.putExtra(EXTRA_OUTPUT_CORNER_RADIUS, outputCornerRadiusDp)
+        intent.putExtra(EXTRA_HEADER_CORNER_RADIUS, headerCornerRadiusDp)
+        intent.putExtra(EXTRA_FONT_PATH, if (getIntent() == null) null else getIntent().getStringExtra(EXTRA_FONT_PATH))
+        intent.putExtra(EXTRA_FONT_NAME, if (getIntent() == null) null else getIntent().getStringExtra(EXTRA_FONT_NAME))
+        intent.putExtra(EXTRA_TERMINAL_BG_IMAGE, terminalBackgroundImage)
+        intent.putExtra(EXTRA_CYBERDECK_MODE, cyberdeckMode)
+        startActivity(intent)
     }
 
     private fun previewResolvedFile(file: File?) {
@@ -2389,7 +2411,11 @@ class MainActivity : Activity() {
             "yml",
             "yaml",
             "log",
-            "csv"
+            "csv",
+            "stignore",
+            "gitignore",
+            "env",
+            "nomedia"
         )
     }
 
