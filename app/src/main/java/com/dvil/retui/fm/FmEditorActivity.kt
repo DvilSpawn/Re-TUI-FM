@@ -55,6 +55,7 @@ class FmEditorActivity : Activity() {
     private var outputCornerRadiusDp = 0
     private var headerCornerRadiusDp = 0
     private var cyberdeckMode = false
+    private var crtFilter = false
     private var headerTextSizeSp = 14
     private var outputTextSizeSp = 13
     private var terminalBackgroundImage: String? = null
@@ -95,6 +96,7 @@ class FmEditorActivity : Activity() {
         val screen = FrameLayout(this)
         screen.setBackgroundColor(Color.TRANSPARENT)
         applyWallpaperBackground(screen)
+        applyCrtForeground(screen)
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
@@ -173,10 +175,8 @@ class FmEditorActivity : Activity() {
             window.attributes.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            window.statusBarColor = Color.TRANSPARENT
-            window.navigationBarColor = Color.BLACK
-        }
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.BLACK
     }
 
     private fun applyWallpaperBackground(screen: FrameLayout) {
@@ -191,6 +191,14 @@ class FmEditorActivity : Activity() {
             }
         }
         screen.setBackgroundColor(Color.TRANSPARENT)
+    }
+
+    private fun applyCrtForeground(screen: FrameLayout) {
+        screen.foreground = if (crtFilter) {
+            CrtOverlayDrawable(this).apply { setAccentColor(outputTextColor) }
+        } else {
+            null
+        }
     }
 
     private fun saveAndClose() {
@@ -362,6 +370,7 @@ class FmEditorActivity : Activity() {
         outputCornerRadiusDp = intExtra(MainActivity.EXTRA_OUTPUT_CORNER_RADIUS, outputCornerRadiusDp)
         headerCornerRadiusDp = intExtra(MainActivity.EXTRA_HEADER_CORNER_RADIUS, headerCornerRadiusDp)
         cyberdeckMode = booleanExtra(MainActivity.EXTRA_CYBERDECK_MODE, cyberdeckMode)
+        crtFilter = booleanExtra(MainActivity.EXTRA_CRT_FILTER, booleanExtra("enable_crt_filter", crtFilter))
         terminalBackgroundImage = intent?.getStringExtra(MainActivity.EXTRA_TERMINAL_BG_IMAGE)
         appTypeface = resolveTypeface()
     }
@@ -376,6 +385,13 @@ class FmEditorActivity : Activity() {
         }
         val name = intent?.getStringExtra(MainActivity.EXTRA_FONT_NAME)
         if (!TextUtils.isEmpty(name)) {
+            if (name.equals("system", true)) return Typeface.DEFAULT
+            if (name.equals("lucida_console", true)) {
+                try {
+                    return Typeface.createFromAsset(assets, "lucida_console.ttf")
+                } catch (_: Exception) {
+                }
+            }
             return Typeface.create(name, Typeface.NORMAL)
         }
         return Typeface.MONOSPACE

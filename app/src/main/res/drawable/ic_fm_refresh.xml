@@ -1,4 +1,4 @@
-<!-- Source: Tabler Icons outline/arrow-up.svg, MIT License. -->
+<!-- Source: Tabler Icons outline/refresh.svg, MIT License. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -10,19 +10,12 @@
         android:strokeWidth="2"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:pathData="M12 5l0 14" />
+        android:pathData="M20 11a8.1 8.1 0 0 0 -15.5 -2m-0.5 -4v4h4" />
     <path
         android:fillColor="@android:color/transparent"
         android:strokeColor="#FFFFFFFF"
         android:strokeWidth="2"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:pathData="M18 11l-6 -6" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="2"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round"
-        android:pathData="M6 11l6 -6" />
+        android:pathData="M4 13a8.1 8.1 0 0 0 15.5 2m0.5 4v-4h-4" />
 </vector>
