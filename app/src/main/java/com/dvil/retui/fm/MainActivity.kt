@@ -52,6 +52,8 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.Locale
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.math.max
 import kotlin.math.min
 
@@ -103,6 +105,8 @@ class MainActivity : Activity() {
     private var leftDiskView: TextView? = null
     private var rightDiskView: TextView? = null
     private var addressPathView: TextView? = null
+    private var selectionBar: LinearLayout? = null
+    private val selectedPaths = LinkedHashSet<String>()
     private var currentScreen = Screen.HOME
     private var rightVirtualTitle: String? = null
     private var categoryLoadVersion = 0
@@ -179,19 +183,20 @@ class MainActivity : Activity() {
         rootView?.requestFocus()
         ensureStorageAccess()
         if (shouldOpenTree(intent)) showTree(start) else showHome()
-        handleIncomingCommand(intent)
+        handleIncomingRequest(intent)
     }
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         setIntent(intent)
+        selectedPaths.clear()
         applyThemeExtras(intent)
         val start = resolveStartDirectory(intent)
         leftPane = PaneState(start)
         rightPane = PaneState(start)
         setContentView(buildUi())
         if (shouldOpenTree(intent)) showTree(start) else showHome()
-        handleIncomingCommand(intent)
+        handleIncomingRequest(intent)
     }
 
     override fun onResume() {
@@ -204,6 +209,10 @@ class MainActivity : Activity() {
     }
 
     override fun onBackPressed() {
+        if (selectedPaths.isNotEmpty()) {
+            clearSelection()
+            return
+        }
         if (currentScreen == Screen.HOME) {
             finish()
             return
@@ -260,11 +269,53 @@ class MainActivity : Activity() {
         main.addView(buildTopBar(), LinearLayout.LayoutParams(-1, dp(18)))
         main.addView(buildMenuBar(), LinearLayout.LayoutParams(-1, dp(30)))
         main.addView(buildAddressBar(), LinearLayout.LayoutParams(-1, dp(36)))
+        main.addView(buildSelectionBar(), LinearLayout.LayoutParams(-1, dp(38)))
         contentHost = FrameLayout(this)
         val hostParams = LinearLayout.LayoutParams(-1, 0, 1f)
         hostParams.topMargin = dp(4)
         main.addView(contentHost, hostParams)
         return root
+    }
+
+    private fun buildSelectionBar(): LinearLayout {
+        val row = LinearLayout(this)
+        selectionBar = row
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(6), dp(3), dp(6), dp(3))
+        row.background = toolbarDrawable()
+        row.visibility = if (selectedPaths.isEmpty()) View.GONE else View.VISIBLE
+        updateSelectionBar()
+        return row
+    }
+
+    private fun updateSelectionBar() {
+        val row = selectionBar ?: return
+        row.removeAllViews()
+        row.visibility = if (selectedPaths.isEmpty()) View.GONE else View.VISIBLE
+        if (selectedPaths.isEmpty()) return
+        val count = label("${selectedPaths.size} selected", max(10, outputTextSizeSp - 2), true)
+        count.gravity = Gravity.CENTER_VERTICAL
+        count.setTextColor(moduleTextColor)
+        row.addView(count, LinearLayout.LayoutParams(0, -1, 1f))
+        addSelectionAction(row, "COPY") { promptBulkDestination(false) }
+        addSelectionAction(row, "MOVE") { promptBulkDestination(true) }
+        addSelectionAction(row, "TRASH") { confirmBulkTrash() }
+        addSelectionAction(row, "SHARE") { shareSelectedFiles() }
+        addSelectionAction(row, "ZIP") { promptZipSelected() }
+        addSelectionAction(row, "X") { clearSelection() }
+    }
+
+    private fun addSelectionAction(parent: LinearLayout, text: String, action: () -> Unit) {
+        val button = label(text, max(9, outputTextSizeSp - 3), true)
+        button.gravity = Gravity.CENTER
+        button.setTextColor(moduleButtonTextColor)
+        button.background = functionButtonBackground()
+        button.setOnClickListener { action() }
+        val params = LinearLayout.LayoutParams(-2, -1)
+        params.leftMargin = dp(4)
+        params.width = dp(if (text == "SHARE" || text == "TRASH") 56 else 48)
+        parent.addView(button, params)
     }
 
     private fun buildTreePanes(): View {
@@ -405,15 +456,13 @@ class MainActivity : Activity() {
                 activePanel = Panel.RIGHT
                 rightPane.cursor = position
                 clampCursor(rightPane)
-                openSelected()
+                val entry = rightPane.rows.getOrNull(position)
+                if (selectedPaths.isNotEmpty()) entry?.file?.let(::toggleSelection) else openSelected()
             }
             grid.setOnItemLongClickListener { _, _, position, _ ->
                 activePanel = Panel.RIGHT
                 rightPane.cursor = position
-                renderActivePane()
-                rightPane.rows.getOrNull(position)?.let { entry ->
-                    entry.file?.let { if (entry.isParent) changeDirectory(it) else showItemMenu(it) }
-                }
+                rightPane.rows.getOrNull(position)?.takeUnless { it.isParent }?.file?.let(::toggleSelection)
                 true
             }
             pane.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -438,12 +487,15 @@ class MainActivity : Activity() {
     }
 
     private fun shouldOpenTree(intent: Intent?): Boolean {
-        return !intent?.getStringExtra(EXTRA_COMMAND).isNullOrBlank() ||
+        return !intent?.getStringExtra(EXTRA_ACTION).isNullOrBlank() ||
+            !intent?.getStringExtra(EXTRA_COMMAND).isNullOrBlank() ||
             !intent?.getStringExtra(EXTRA_PATH).isNullOrBlank() ||
             searchRequestExtra(intent) != null
     }
 
     private fun showHome() {
+        selectedPaths.clear()
+        updateSelectionBar()
         clearVirtualCategory()
         currentScreen = Screen.HOME
         homeCountVersion++
@@ -644,11 +696,19 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun handleIncomingCommand(intent: Intent?) {
-        searchRequestExtra(intent)?.let {
-            runFind(it)
+    private fun handleIncomingRequest(intent: Intent?) {
+        val action = intent?.getStringExtra(EXTRA_ACTION)?.trim()?.lowercase(Locale.US)
+        if (action == ACTION_SEARCH) {
+            searchRequestExtra(intent)?.let(::runFind)
             return
         }
+        if (action == ACTION_OPEN) return
+        val search = searchRequestExtra(intent)
+        if (search != null) {
+            runFind(search)
+            return
+        }
+        // Temporary compatibility for Launcher versions that still send a raw command.
         val command = intent?.getStringExtra(EXTRA_COMMAND)?.trim()
         if (!command.isNullOrEmpty()) {
             runCommand(command)
@@ -965,7 +1025,7 @@ class MainActivity : Activity() {
     }
 
     private fun bindGridCell(cell: LinearLayout, entry: FileEntry, index: Int) {
-        val selected = activePanel == Panel.RIGHT && index == rightPane.cursor
+        val selected = entry.file?.absolutePath in selectedPaths || activePanel == Panel.RIGHT && index == rightPane.cursor
         val color = rowTextColor(selected, entry.isDirectory)
         val iconColor = iconColor(selected)
         cell.background = rowSelectionBackground(selected)
@@ -992,13 +1052,15 @@ class MainActivity : Activity() {
             activePanel = panel
             pane(panel).cursor = index
             clampCursor(pane(panel))
-            openSelected()
+            if (panel == Panel.RIGHT && selectedPaths.isNotEmpty()) entry.file?.let(::toggleSelection) else openSelected()
         }
         row.setOnLongClickListener {
             activePanel = panel
             pane(panel).cursor = index
-            renderActivePane()
-            entry.file?.let { if (entry.isParent) changeDirectory(it) else showItemMenu(it) }
+            entry.file?.let {
+                if (panel == Panel.RIGHT && !entry.isParent) toggleSelection(it)
+                else if (!entry.isParent) showItemMenu(it)
+            }
             true
         }
 
@@ -1119,6 +1181,8 @@ class MainActivity : Activity() {
             showOutput("CD", "Cannot read: ${dir.absolutePath}")
             return
         }
+        selectedPaths.clear()
+        updateSelectionBar()
         if (currentScreen != Screen.TREE) {
             showTree(dir)
             return
@@ -1139,6 +1203,8 @@ class MainActivity : Activity() {
             showOutput("CD", "Cannot read: ${dir.absolutePath}")
             return
         }
+        selectedPaths.clear()
+        updateSelectionBar()
         if (currentScreen != Screen.TREE) {
             showTree(dir)
             return
@@ -1258,6 +1324,195 @@ class MainActivity : Activity() {
         intent.putExtra(Intent.EXTRA_STREAM, uri)
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         startActivity(Intent.createChooser(intent, file.name))
+    }
+
+    private fun toggleSelection(file: File) {
+        if (!file.exists() || file.name == TRASH_DIR_NAME) return
+        if (!selectedPaths.add(file.absolutePath)) selectedPaths.remove(file.absolutePath)
+        updateSelectionBar()
+        renderPane(Panel.RIGHT)
+    }
+
+    private fun selectedFiles(): List<File> = selectedPaths.map(::File).filter(File::exists)
+
+    private fun clearSelection() {
+        selectedPaths.clear()
+        updateSelectionBar()
+        renderPane(Panel.RIGHT)
+    }
+
+    private fun promptBulkDestination(move: Boolean) {
+        val files = selectedFiles()
+        if (files.isEmpty()) return clearSelection()
+        val panel = dialogPanel(if (move) "Move ${files.size} items" else "Copy ${files.size} items")
+        val input = EditText(this)
+        input.setSingleLine(true)
+        input.typeface = appTypeface
+        input.setText(rightPane.directory.absolutePath)
+        input.selectAll()
+        input.setTextColor(inputTextColor)
+        input.setTextSize(inputFontSizeSp.toFloat())
+        input.background = addressDrawable()
+        input.setPadding(dp(8), 0, dp(8), 0)
+        panel.addView(input, LinearLayout.LayoutParams(-1, dp(44)))
+        lateinit var dialog: AlertDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
+        addDialogButton(buttons, if (move) "MOVE" else "COPY") {
+            val destination = File(input.text.toString().trim())
+            if (!destination.isDirectory) {
+                input.error = "Choose an existing folder"
+                return@addDialogButton
+            }
+            dialog.dismiss()
+            runBulkTransfer(files, destination, move)
+        }
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
+        dialog = showDialogPanel(panel, input)
+    }
+
+    private fun runBulkTransfer(files: List<File>, destination: File, move: Boolean) {
+        Thread {
+            var completed = 0
+            var failure: String? = null
+            for (source in files) {
+                try {
+                    val sourcePath = source.canonicalPath
+                    val destinationPath = destination.canonicalPath
+                    if (move && source.parentFile?.canonicalPath == destinationPath) {
+                        throw IllegalArgumentException("${source.name} is already in that folder")
+                    }
+                    if (source.isDirectory && destinationPath.startsWith("$sourcePath${File.separator}")) {
+                        throw IllegalArgumentException("Cannot place ${source.name} inside itself")
+                    }
+                    val target = uniqueFile(File(destination, source.name))
+                    if (move && !source.renameTo(target)) {
+                        copyRecursively(source, target)
+                        val deleted = if (source.isDirectory) source.deleteRecursively() else source.delete()
+                        if (!deleted) throw IllegalStateException("Could not remove ${source.name}")
+                    } else if (!move) {
+                        copyRecursively(source, target)
+                    }
+                    completed++
+                } catch (e: Exception) {
+                    failure = e.message ?: source.name
+                    break
+                }
+            }
+            runOnUiThread {
+                selectedPaths.clear()
+                reloadAll()
+                updateSelectionBar()
+                showOutput(if (move) "MOVE" else "COPY", failure ?: "$completed items completed")
+            }
+        }.start()
+    }
+
+    private fun confirmBulkTrash() {
+        val files = selectedFiles()
+        if (files.isEmpty()) return clearSelection()
+        val panel = dialogPanel("Move ${files.size} items to trash?")
+        lateinit var dialog: AlertDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
+        addDialogButton(buttons, "TRASH") {
+            dialog.dismiss()
+            val moved = files.count(::moveToTrash)
+            selectedPaths.clear()
+            reloadAll()
+            updateSelectionBar()
+            showOutput("TRASH", "$moved of ${files.size} items moved to trash")
+        }
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
+        dialog = showDialogPanel(panel)
+    }
+
+    private fun shareSelectedFiles() {
+        val files = selectedFiles().filter(File::isFile)
+        val uris = ArrayList<Uri>()
+        files.forEach { uriFor(it)?.let(uris::add) }
+        if (uris.isEmpty()) {
+            showOutput("SHARE", "Select one or more files")
+            return
+        }
+        val intent = Intent(Intent.ACTION_SEND_MULTIPLE)
+        intent.type = "*/*"
+        intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        startActivity(Intent.createChooser(intent, "Share ${uris.size} files"))
+    }
+
+    private fun promptZipSelected() {
+        val files = selectedFiles()
+        if (files.isEmpty()) return clearSelection()
+        val panel = dialogPanel("Create ZIP from ${files.size} items")
+        val input = EditText(this)
+        input.setSingleLine(true)
+        input.typeface = appTypeface
+        input.setText("archive.zip")
+        input.selectAll()
+        input.setTextColor(inputTextColor)
+        input.setTextSize(inputFontSizeSp.toFloat())
+        input.background = addressDrawable()
+        input.setPadding(dp(8), 0, dp(8), 0)
+        panel.addView(input, LinearLayout.LayoutParams(-1, dp(44)))
+        lateinit var dialog: AlertDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
+        addDialogButton(buttons, "CREATE") {
+            val rawName = input.text.toString().trim()
+            if (rawName.isEmpty()) {
+                input.error = "Enter an archive name"
+                return@addDialogButton
+            }
+            val name = if (rawName.endsWith(".zip", true)) rawName else "$rawName.zip"
+            val target = File(rightPane.directory, name)
+            if (target.exists()) {
+                input.error = "Archive already exists"
+                return@addDialogButton
+            }
+            dialog.dismiss()
+            createZip(files, target)
+        }
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
+        dialog = showDialogPanel(panel, input)
+    }
+
+    private fun createZip(files: List<File>, target: File) {
+        Thread {
+            var failure: String? = null
+            try {
+                ZipOutputStream(FileOutputStream(target)).use { zip ->
+                    files.forEach { addToZip(zip, it, it.name) }
+                }
+            } catch (e: Exception) {
+                target.delete()
+                failure = e.message ?: "Could not create archive"
+            }
+            runOnUiThread {
+                selectedPaths.clear()
+                reloadAll()
+                updateSelectionBar()
+                showOutput("ZIP", failure ?: "Created ${target.absolutePath}")
+            }
+        }.start()
+    }
+
+    private fun addToZip(zip: ZipOutputStream, file: File, entryName: String) {
+        val cleanName = entryName.replace(File.separatorChar, '/')
+        if (file.isDirectory) {
+            val children = file.listFiles().orEmpty()
+            if (children.isEmpty()) {
+                zip.putNextEntry(ZipEntry("$cleanName/"))
+                zip.closeEntry()
+            } else {
+                children.forEach { addToZip(zip, it, "$cleanName/${it.name}") }
+            }
+            return
+        }
+        zip.putNextEntry(ZipEntry(cleanName))
+        FileInputStream(file).use { it.copyTo(zip) }
+        zip.closeEntry()
     }
 
     private fun runMkdir(parts: List<String>) {
@@ -2008,6 +2263,7 @@ class MainActivity : Activity() {
     }
 
     private fun rowSelected(entry: FileEntry, panel: Panel, index: Int): Boolean {
+        if (entry.file?.absolutePath in selectedPaths) return true
         if (panel == Panel.LEFT && activePanel != Panel.LEFT) {
             return entry.file?.absolutePath == rightPane.directory.absolutePath
         }
@@ -2831,6 +3087,7 @@ class MainActivity : Activity() {
 
     companion object {
         const val EXTRA_PATH = "path"
+        const val EXTRA_ACTION = "action"
         const val EXTRA_COMMAND = "command"
         const val EXTRA_SEARCH = "search"
         const val EXTRA_SEARCH_NAME = "search_name"
@@ -2878,6 +3135,8 @@ class MainActivity : Activity() {
         const val EXTRA_TERMINAL_BG_IMAGE = "terminal_bg_image"
         const val EXTRA_CYBERDECK_MODE = "cyberdeck_mode"
         const val EXTRA_CRT_FILTER = "crt_filter"
+        const val ACTION_SEARCH = "search"
+        const val ACTION_OPEN = "open"
         private const val PREFS_NAME = "retui_fm"
         private const val PREF_CUSTOM_PLACES = "custom_places"
         private const val PREF_TRASH_DIRS = "trash_dirs"

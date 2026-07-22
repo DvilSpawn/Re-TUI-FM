@@ -16,51 +16,32 @@ Re:TUI-FM is a standalone Android file manager for Re:T-UI Launcher. It provides
 - Bounded previews for text, Markdown, JSON, CSV, ZIP, directories, and images.
 - Inline text editing for small text-like files.
 - Guarded trash flow through `.retui-trash` before destructive deletion.
-- Selection commands for batch trash, share, zip, copy, and move.
+- Long-press multi-selection for batch trash, share, ZIP, copy, and move.
 - Favorites and recent-directory navigation.
 - Re:T-UI visual handoff through launch extras for colors, fonts, margins, wallpaper, and CRT/cyberdeck styling.
 - IME, navigation bar, status bar, and display-cutout handling through AndroidX window insets.
 
-## Commands
+## Launcher contract
 
-Core commands:
+Re:T-UI Launcher opens FM with `com.dvil.retui.fm.OPEN_CONSOLE` and structured extras. Launcher owns the public `files` command grammar; FM owns the file-operation UI and behavior.
 
 ```text
-help
-cd [folder]
-cd ..
-ls
-pwd
-tree [-a -d -f -h -s -D -F -i -r --dirsfirst --ignore-case --noreport -L n -P pattern -I pattern --sort name|size|mtime]
-find [path] -name [pattern] [-x|-a] [--type image|video|audio|doc|dir|file] [--size +100M]
-search [pattern]
-filter [pattern]
-preview [file]
-peek [file]
-edit [text file]
-open [file]
-share [file]
-mkdir [folder]
-cp [-r] [source] [destination]
-mv [source] [destination]
-rm [-r] [file]
-rm --permanent [file]
-trash [file]
-restore [label|all]
-zip -r [archive.zip] [folder]
-sel add|rm|list|clear|trash|share|zip|cp|mv
-recent
-back
-fav here
-fav add [label] [path]
-fav go [label]
-fav rm [label]
-fav rename [old] [new]
-fav list
-permission
-refresh
-exit
+files
+files -search <name> [type]
+files -open <directory>
 ```
+
+Intent extras:
+
+- `action=search`, with `search_name` and optional `search_type`.
+- `action=open`, with `path`.
+- `path` may accompany search to select its root.
+
+The older `command` extra remains temporarily supported for installed Launcher versions during migration, but it is not the forward contract.
+
+## Multi-select
+
+Long-press a file or folder to begin selection, tap more items to toggle them, then use the visible selection bar: `COPY`, `MOVE`, `TRASH`, `SHARE`, `ZIP`, or `X` to clear. Back also exits selection mode before navigating.
 
 ## Permissions
 
