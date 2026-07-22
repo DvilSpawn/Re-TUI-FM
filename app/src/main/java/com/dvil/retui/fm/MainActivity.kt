@@ -34,8 +34,6 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.Window
 import android.view.WindowManager
-import android.view.inputmethod.EditorInfo
-import android.view.inputmethod.InputMethodManager
 import android.webkit.MimeTypeMap
 import android.widget.AbsListView
 import android.widget.BaseAdapter
@@ -77,6 +75,11 @@ class MainActivity : Activity() {
         val mimeTypes: Set<String> = emptySet()
     )
 
+    private data class SearchRequest(
+        val nameTerm: String?,
+        val typeTerm: String?
+    )
+
     private data class PaneState(
         var directory: File,
         val rows: ArrayList<FileEntry> = ArrayList(),
@@ -100,7 +103,6 @@ class MainActivity : Activity() {
     private var leftDiskView: TextView? = null
     private var rightDiskView: TextView? = null
     private var addressPathView: TextView? = null
-    private var inputView: EditText? = null
     private var currentScreen = Screen.HOME
     private var rightVirtualTitle: String? = null
     private var categoryLoadVersion = 0
@@ -353,6 +355,7 @@ class MainActivity : Activity() {
         address.gravity = Gravity.CENTER_VERTICAL
         address.setPadding(dp(8), 0, dp(8), 0)
         address.background = addressDrawable()
+        address.setOnClickListener { promptSearch(homeDirectory(), "Search device") }
         val folder = ImageView(this)
         folder.setImageResource(R.drawable.ic_fm_folder)
         folder.setColorFilter(iconColor(false))
@@ -436,7 +439,8 @@ class MainActivity : Activity() {
 
     private fun shouldOpenTree(intent: Intent?): Boolean {
         return !intent?.getStringExtra(EXTRA_COMMAND).isNullOrBlank() ||
-            !intent?.getStringExtra(EXTRA_PATH).isNullOrBlank()
+            !intent?.getStringExtra(EXTRA_PATH).isNullOrBlank() ||
+            searchRequestExtra(intent) != null
     }
 
     private fun showHome() {
@@ -544,14 +548,15 @@ class MainActivity : Activity() {
         row.addView(glyphView(glyph, iconColor(false), max(16, outputTextSizeSp + 2)), LinearLayout.LayoutParams(dp(34), -1))
         val text = LinearLayout(this)
         text.orientation = LinearLayout.VERTICAL
+        text.gravity = Gravity.CENTER_VERTICAL
         val top = label(title, outputTextSizeSp, true)
-        top.gravity = Gravity.START
+        top.gravity = Gravity.START or Gravity.BOTTOM
         top.setTextColor(fileTextColor)
         val bottom = label(subtitle, max(9, outputTextSizeSp - 3), false)
-        bottom.gravity = Gravity.START
+        bottom.gravity = Gravity.START or Gravity.TOP
         bottom.setTextColor(withAlpha(outputTextColor, 175))
-        text.addView(top, LinearLayout.LayoutParams(-1, 0, 1f))
-        text.addView(bottom, LinearLayout.LayoutParams(-1, 0, 1f))
+        text.addView(top, LinearLayout.LayoutParams(-1, dp(24)))
+        text.addView(bottom, LinearLayout.LayoutParams(-1, dp(18)))
         row.addView(text, LinearLayout.LayoutParams(0, -1, 1f))
         val arrow = label(">", outputTextSizeSp, true)
         arrow.gravity = Gravity.CENTER
@@ -576,7 +581,6 @@ class MainActivity : Activity() {
 
     private fun handleHardwareKey(keyCode: Int, event: KeyEvent?): Boolean {
         if (event == null || event.action != KeyEvent.ACTION_DOWN) return false
-        if (inputView?.hasFocus() == true && !inputView!!.text.toString().isEmpty()) return false
         return when (keyCode) {
             KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_DPAD_CENTER -> {
                 openSelected()
@@ -618,13 +622,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun submitInputOrOpenSelection() {
-        val command = inputView?.text?.toString()?.trim() ?: ""
-        if (command.isEmpty()) openSelected() else runCommand(command)
-    }
-
     private fun runCommand(command: String) {
-        inputView?.setText("")
         val parts = splitCommand(command)
         if (parts.isEmpty()) return
         when (parts[0].lowercase(Locale.US)) {
@@ -640,18 +638,34 @@ class MainActivity : Activity() {
             "rm", "delete" -> runDelete(parts)
             "cp" -> runCopy(parts)
             "mv", "renmov" -> runMove(parts)
-            "find", "search" -> runFind(parts.drop(1).joinToString(" "))
+            "find", "search" -> runFind(searchRequestFromParts(parts.drop(1)))
             "exit", "quit", "close" -> finish()
             else -> showOutput("ERROR", "Command not found: $command")
         }
-        refocusInput()
     }
 
     private fun handleIncomingCommand(intent: Intent?) {
+        searchRequestExtra(intent)?.let {
+            runFind(it)
+            return
+        }
         val command = intent?.getStringExtra(EXTRA_COMMAND)?.trim()
         if (!command.isNullOrEmpty()) {
             runCommand(command)
         }
+    }
+
+    private fun searchExtra(intent: Intent?): String? {
+        return stringExtra(intent, EXTRA_SEARCH, "query", "q", "search_query")
+    }
+
+    private fun searchRequestExtra(intent: Intent?): SearchRequest? {
+        val name = stringExtra(intent, EXTRA_SEARCH_NAME, "file_name", "filename")
+        val type = stringExtra(intent, EXTRA_SEARCH_TYPE, "search_file_type", "file_type", "extension", "ext")
+        if (!name.isNullOrBlank() || !type.isNullOrBlank()) {
+            return SearchRequest(cleanSearchTerm(name), cleanSearchTerm(type))
+        }
+        return searchExtra(intent)?.takeIf { it.isNotBlank() }?.let { searchRequestFromText(it) }
     }
 
     private fun reloadAll() {
@@ -1275,16 +1289,27 @@ class MainActivity : Activity() {
     }
 
     private fun confirmDelete(file: File) {
-        AlertDialog.Builder(this)
-            .setTitle("Delete ${file.name}?")
-            .setMessage(file.absolutePath)
-            .setNegativeButton("CANCEL", null)
-            .setPositiveButton("TRASH") { _, _ ->
-                val ok = moveToTrash(file)
-                reloadAll()
-                showOutput("TRASH", if (ok) "Moved to .retui-trash:\n${file.absolutePath}" else "Could not trash ${file.absolutePath}")
-            }
-            .show()
+        val panel = dialogPanel("Delete ${file.name}?")
+        val path = label(file.absolutePath, max(10, outputTextSizeSp - 2), false)
+        path.gravity = Gravity.CENTER_VERTICAL or Gravity.START
+        path.setSingleLine(false)
+        path.setTextColor(withAlpha(outputTextColor, 190))
+        path.setPadding(dp(8), dp(8), dp(8), dp(8))
+        panel.addView(path, LinearLayout.LayoutParams(-1, -2))
+
+        lateinit var dialog: AlertDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
+        addDialogButton(buttons, "TRASH") {
+            dialog.dismiss()
+            val ok = moveToTrash(file)
+            reloadAll()
+            showOutput("TRASH", if (ok) "Moved to .retui-trash:\n${file.absolutePath}" else "Could not trash ${file.absolutePath}")
+        }
+        val buttonParams = LinearLayout.LayoutParams(-1, dp(44))
+        buttonParams.topMargin = dp(10)
+        panel.addView(buttons, buttonParams)
+        dialog = showDialogPanel(panel)
     }
 
     private fun showItemMenu(file: File) {
@@ -1303,6 +1328,8 @@ class MainActivity : Activity() {
             actions.add { shareFile(file) }
         }
         if (file.isDirectory) {
+            labels.add("Search this folder")
+            actions.add { promptSearch(file, "Search ${file.name.ifBlank { "folder" }}") }
             labels.add("New folder here")
             actions.add { promptMkdir(file) }
             if (!isPlace(file)) {
@@ -1343,29 +1370,85 @@ class MainActivity : Activity() {
     }
 
     private fun promptMkdir(baseDir: File = contentPane().directory) {
+        val panel = dialogPanel("New folder")
+        val path = label(baseDir.absolutePath, max(10, outputTextSizeSp - 2), false)
+        path.gravity = Gravity.CENTER_VERTICAL or Gravity.START
+        path.setSingleLine(true)
+        path.ellipsize = TextUtils.TruncateAt.START
+        path.setTextColor(withAlpha(outputTextColor, 190))
+        panel.addView(path, LinearLayout.LayoutParams(-1, dp(24)))
+
         val input = EditText(this)
         input.setSingleLine(true)
         input.typeface = appTypeface
         input.setTextColor(inputTextColor)
         input.setHintTextColor(withAlpha(inputTextColor, 145))
+        input.setTextSize(inputFontSizeSp.toFloat())
+        input.setPadding(dp(8), 0, dp(8), 0)
+        input.background = addressDrawable()
         input.hint = "Folder name"
-        AlertDialog.Builder(this)
-            .setTitle("New folder")
-            .setView(input)
-            .setNegativeButton("CANCEL", null)
-            .setPositiveButton("CREATE") { _, _ ->
-                val name = input.text.toString().trim()
-                if (name.isNotEmpty()) {
-                    val dir = File(baseDir, name)
-                    if (dir.mkdirs()) {
-                        reloadAll()
-                        showOutput("MKDIR", "Created ${dir.absolutePath}")
-                    } else {
-                        showOutput("MKDIR", "Could not create ${dir.absolutePath}")
-                    }
+        val inputParams = LinearLayout.LayoutParams(-1, dp(44))
+        inputParams.topMargin = dp(8)
+        panel.addView(input, inputParams)
+
+        lateinit var dialog: AlertDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
+        addDialogButton(buttons, "CREATE") {
+            val name = input.text.toString().trim()
+            dialog.dismiss()
+            if (name.isNotEmpty()) {
+                val dir = File(baseDir, name)
+                if (dir.mkdirs()) {
+                    reloadAll()
+                    showOutput("MKDIR", "Created ${dir.absolutePath}")
+                } else {
+                    showOutput("MKDIR", "Could not create ${dir.absolutePath}")
                 }
             }
-            .show()
+        }
+        val buttonParams = LinearLayout.LayoutParams(-1, dp(44))
+        buttonParams.topMargin = dp(10)
+        panel.addView(buttons, buttonParams)
+        dialog = showDialogPanel(panel, input)
+    }
+
+    private fun promptSearch(root: File = homeDirectory(), title: String = "Search") {
+        val panel = dialogPanel(title)
+
+        val path = label(root.absolutePath, max(10, outputTextSizeSp - 2), false)
+        path.gravity = Gravity.CENTER_VERTICAL or Gravity.START
+        path.setSingleLine(true)
+        path.ellipsize = TextUtils.TruncateAt.START
+        path.setTextColor(withAlpha(outputTextColor, 190))
+        panel.addView(path, LinearLayout.LayoutParams(-1, dp(24)))
+
+        val input = EditText(this)
+        input.setSingleLine(true)
+        input.typeface = appTypeface
+        input.setTextColor(inputTextColor)
+        input.setHintTextColor(withAlpha(inputTextColor, 145))
+        input.setTextSize(inputFontSizeSp.toFloat())
+        input.setPadding(dp(8), 0, dp(8), 0)
+        input.background = addressDrawable()
+        input.hint = "Name contains..."
+        val inputParams = LinearLayout.LayoutParams(-1, dp(44))
+        inputParams.topMargin = dp(8)
+        panel.addView(input, inputParams)
+
+        lateinit var dialog: AlertDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
+        addDialogButton(buttons, "SEARCH") {
+            val query = input.text.toString().trim()
+            dialog.dismiss()
+            if (query.isNotEmpty()) runFind(searchRequestFromText(query), root)
+        }
+
+        val buttonParams = LinearLayout.LayoutParams(-1, dp(44))
+        buttonParams.topMargin = dp(10)
+        panel.addView(buttons, buttonParams)
+        dialog = showDialogPanel(panel, input)
     }
 
     private fun runCopy(parts: List<String>) {
@@ -1408,31 +1491,138 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun runFind(query: String) {
-        if (query.isBlank()) {
-            showOutput("FIND", "find: usage: find [pattern]")
+    private fun runFind(request: SearchRequest, root: File = contentPane().directory) {
+        val label = searchLabel(request)
+        if (label.isBlank()) {
+            showOutput("FIND", "find: usage: find [name] [type]")
             return
         }
         val loadVersion = ++findVersion
-        val root = contentPane().directory
-        val pattern = query.lowercase(Locale.US)
+        showFindRows(label, root, listOf(FileEntry(null, "Searching for $label...", false)))
         Toast.makeText(this, "Searching...", Toast.LENGTH_SHORT).show()
         Thread {
-            val out = StringBuilder()
-            var count = 0
-            root.walkTopDown().maxDepth(8).forEach { file ->
-                if (count >= 80) return@forEach
-                if (file.name.lowercase(Locale.US).contains(pattern)) {
-                    out.append(file.absolutePath).append('\n')
-                    count++
+            val out = ArrayList<FileEntry>()
+            root.walkTopDown().onFail { _, _ -> }.forEach { file ->
+                if (out.size >= MAX_ROWS) return@forEach
+                if (matchesSearch(file, request)) {
+                    out.add(FileEntry(file, file.name, file.isDirectory))
                 }
             }
             runOnUiThread {
                 if (loadVersion == findVersion) {
-                    showOutput("FIND", if (out.isEmpty()) "No matches for $query" else out.toString())
+                    showFindRows(
+                        label,
+                        root,
+                        if (out.isEmpty()) listOf(FileEntry(null, "No matches for $label", false)) else out
+                    )
                 }
             }
         }.start()
+    }
+
+    private fun searchRequestFromText(text: String): SearchRequest {
+        return searchRequestFromParts(splitCommand(text))
+    }
+
+    private fun searchRequestFromParts(parts: List<String>): SearchRequest {
+        if (parts.isEmpty()) return SearchRequest(null, null)
+        val last = parts.last()
+        return if (parts.size >= 2 && isSearchTypeToken(last)) {
+            SearchRequest(cleanSearchTerm(parts.dropLast(1).joinToString(" ")), cleanSearchTerm(last))
+        } else {
+            SearchRequest(cleanSearchTerm(parts.joinToString(" ")), null)
+        }
+    }
+
+    private fun cleanSearchTerm(value: String?): String? {
+        return value
+            ?.trim()
+            ?.replace("\\*", "*")
+            ?.replace("\\?", "?")
+            ?.takeIf { it.isNotEmpty() && it != "*" }
+    }
+
+    private fun searchLabel(request: SearchRequest): String {
+        val name = request.nameTerm ?: "*"
+        val type = request.typeTerm
+        return if (type.isNullOrBlank()) request.nameTerm.orEmpty() else "$name $type"
+    }
+
+    private fun matchesSearch(file: File, request: SearchRequest): Boolean {
+        return matchesName(file.name, request.nameTerm) && matchesType(file, request.typeTerm)
+    }
+
+    private fun matchesName(name: String, term: String?): Boolean {
+        val clean = term?.lowercase(Locale.US)?.trim().orEmpty()
+        if (clean.isEmpty()) return true
+        val value = name.lowercase(Locale.US)
+        if (!clean.contains('*') && !clean.contains('?')) return value.contains(clean)
+        return globRegex(clean).matches(value)
+    }
+
+    private fun globRegex(pattern: String): Regex {
+        val out = StringBuilder("^")
+        for (ch in pattern) {
+            when (ch) {
+                '*' -> out.append(".*")
+                '?' -> out.append('.')
+                else -> out.append(Regex.escape(ch.toString()))
+            }
+        }
+        out.append('$')
+        return Regex(out.toString())
+    }
+
+    private fun matchesType(file: File, term: String?): Boolean {
+        val clean = term?.lowercase(Locale.US)?.trim().orEmpty()
+        if (clean.isEmpty() || clean == "*") return true
+        val ext = file.extension.lowercase(Locale.US)
+        if (clean in DIRECTORY_TYPE_TOKENS) return file.isDirectory
+        if (file.isDirectory) return false
+        if (clean.startsWith(".")) return ext == clean.drop(1)
+        val mime = mimeFor(file)
+        return when (clean) {
+            "image", "images", "img", "photo", "photos" -> mime.startsWith("image/") || ext in IMAGE_EXTENSIONS
+            "video", "videos", "movie", "movies" -> mime.startsWith("video/") || ext in VIDEO_EXTENSIONS
+            "audio", "music", "sound" -> mime.startsWith("audio/") || ext in AUDIO_EXTENSIONS
+            "doc", "docs", "document", "documents", "text" -> mime in DOCUMENT_MIME_TYPES || ext in DOCUMENT_EXTENSIONS
+            "apk", "apks", "android" -> ext == "apk" || mime == "application/vnd.android.package-archive"
+            "archive", "archives" -> mime in ARCHIVE_MIME_TYPES || ext in ARCHIVE_EXTENSIONS
+            else -> ext == clean
+        }
+    }
+
+    private fun isSearchTypeToken(token: String): Boolean {
+        val clean = token.lowercase(Locale.US).trim()
+        return clean.startsWith(".") ||
+            clean in SEARCH_TYPE_TOKENS ||
+            clean in IMAGE_EXTENSIONS ||
+            clean in VIDEO_EXTENSIONS ||
+            clean in AUDIO_EXTENSIONS ||
+            clean in DOCUMENT_EXTENSIONS ||
+            clean in ARCHIVE_EXTENSIONS ||
+            clean == "apk"
+    }
+
+    private fun showFindRows(query: String, root: File, rows: List<FileEntry>) {
+        if (currentScreen != Screen.TREE || leftRowsView == null || rightGridView == null) {
+            currentScreen = Screen.TREE
+            contentHost?.removeAllViews()
+            contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
+            leftPane.directory = root
+            leftPane.cursor = 0
+            reloadPane(leftPane)
+        }
+        rightVirtualTitle = "SEARCH: $query"
+        rightPane.directory = root
+        rightPane.rows.clear()
+        rightPane.rows.addAll(rows)
+        rightPane.cursor = 0
+        rightPane.summary = summarizeRows(rows)
+        activePanel = Panel.RIGHT
+        renderPane(Panel.LEFT)
+        renderPane(Panel.RIGHT)
+        addressPathView?.text = rightVirtualTitle
     }
 
     private fun copyRecursively(src: File, dst: File) {
@@ -1488,24 +1678,72 @@ class MainActivity : Activity() {
         return target
     }
 
-    private fun showOutput(title: String, message: CharSequence) {
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setMessage(message)
-            .setPositiveButton("OK", null)
-            .show()
-    }
-
-    private fun showHelpPopup() {
+    private fun dialogPanel(title: String): LinearLayout {
         val panel = LinearLayout(this)
         panel.orientation = LinearLayout.VERTICAL
         panel.setPadding(dp(12), dp(10), dp(12), dp(10))
         panel.background = panelDrawable(PanelRole.OUTPUT)
 
-        val heading = label("HELP", max(14, outputTextSizeSp + 1), true)
+        val heading = label(title, max(14, outputTextSizeSp + 1), true)
         heading.gravity = Gravity.CENTER_VERTICAL or Gravity.START
         heading.setTextColor(headerTextColor)
         panel.addView(heading, LinearLayout.LayoutParams(-1, dp(34)))
+        return panel
+    }
+
+    private fun showDialogPanel(panel: View, focus: View? = null): AlertDialog {
+        val dialog = AlertDialog.Builder(this).create()
+        dialog.setView(panel)
+        dialog.show()
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        if (focus != null) {
+            dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+            focus.post { focus.requestFocus() }
+        }
+        return dialog
+    }
+
+    private fun dialogButtonRow(): LinearLayout {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        return row
+    }
+
+    private fun addDialogButton(parent: LinearLayout, text: String, action: () -> Unit) {
+        val button = label(text, outputTextSizeSp, true)
+        button.gravity = Gravity.CENTER
+        button.setTextColor(moduleButtonTextColor)
+        button.background = panelDrawable(PanelRole.MODULE)
+        button.setOnClickListener { action() }
+        val params = LinearLayout.LayoutParams(dp(96), dp(38))
+        params.leftMargin = dp(8)
+        parent.addView(button, params)
+    }
+
+    private fun showOutput(title: String, message: CharSequence) {
+        val panel = dialogPanel(title)
+        val body = label(message.toString(), max(10, outputTextSizeSp - 1), false)
+        body.gravity = Gravity.START
+        body.setSingleLine(false)
+        body.setTextColor(outputTextColor)
+        body.setPadding(dp(8), dp(6), dp(8), dp(6))
+
+        val scroll = ScrollView(this)
+        scroll.addView(body, FrameLayout.LayoutParams(-1, -2))
+        panel.addView(scroll, LinearLayout.LayoutParams(-1, dp(260)))
+
+        lateinit var dialog: AlertDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "OK") { dialog.dismiss() }
+        val buttonParams = LinearLayout.LayoutParams(-1, dp(44))
+        buttonParams.topMargin = dp(8)
+        panel.addView(buttons, buttonParams)
+        dialog = showDialogPanel(panel)
+    }
+
+    private fun showHelpPopup() {
+        val panel = dialogPanel("HELP")
 
         val body = label(helpText(), max(10, outputTextSizeSp - 1), false)
         body.gravity = Gravity.START
@@ -1518,42 +1756,24 @@ class MainActivity : Activity() {
         panel.addView(scroll, LinearLayout.LayoutParams(-1, dp(430)))
 
         lateinit var dialog: AlertDialog
-        val close = label("OK", outputTextSizeSp, true)
-        close.gravity = Gravity.CENTER
-        close.setTextColor(moduleButtonTextColor)
-        close.background = panelDrawable(PanelRole.MODULE)
-        close.setOnClickListener { dialog.dismiss() }
-        val closeParams = LinearLayout.LayoutParams(dp(96), dp(38))
-        closeParams.gravity = Gravity.END
-        closeParams.topMargin = dp(8)
-        panel.addView(close, closeParams)
-
-        dialog = AlertDialog.Builder(this).create()
-        dialog.setView(panel)
-        dialog.show()
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "OK") { dialog.dismiss() }
+        val buttonParams = LinearLayout.LayoutParams(-1, dp(44))
+        buttonParams.topMargin = dp(8)
+        panel.addView(buttons, buttonParams)
+        dialog = showDialogPanel(panel)
     }
 
     private fun helpText(): String {
         return "Menus:\n" +
             "File: new folder, open/share selected, refresh, close\n" +
-            "Edit: edit text, seed copy/move commands, trash\n" +
-            "View: preview, path, pane focus, refresh\n" +
+            "Edit: edit text, trash\n" +
+            "View: preview, search current folder, path, pane focus, refresh\n" +
             "Go: up, home, storage root, set main dir\n" +
             "Places: Home, Downloads, Documents, Pictures, Music\n" +
-            "\nCommands:\n" +
-            "cd [folder]\n" +
-            "ls | refresh\n" +
-            "pwd\n" +
-            "find [pattern]\n" +
-            "preview [file]\n" +
-            "edit [text file]\n" +
-            "open [file]\n" +
-            "share [file]\n" +
-            "mkdir [folder]\n" +
-            "cp [source] [destination]\n" +
-            "mv [source] [destination]\n" +
-            "rm [file]\n" +
+            "\nSearch:\n" +
+            "Tap the path bar to search all phone storage by name.\n" +
+            "Long-press a folder and choose Search this folder to search inside it.\n" +
             "\nKeyboard:\n" +
             "arrows move/open\n" +
             "Enter opens selected\n" +
@@ -1563,10 +1783,6 @@ class MainActivity : Activity() {
     private fun selectedFile(): File? {
         val entry = activePane().rows.getOrNull(activePane().cursor) ?: return null
         return entry.file
-    }
-
-    private fun selectedCommandPath(): String {
-        return quoteIfNeeded(selectedFile()?.absolutePath ?: "")
     }
 
     private fun resolveArg(parts: List<String>, index: Int): File? {
@@ -1641,8 +1857,6 @@ class MainActivity : Activity() {
             "Edit",
             listOf(
                 "Edit selected text" to { withSelected("EDIT") { editFile(it) } },
-                "Copy selected..." to { withSelected("COPY") { seed("cp ${quoteIfNeeded(it.absolutePath)} ") } },
-                "Move/rename selected..." to { withSelected("MOVE") { seed("mv ${quoteIfNeeded(it.absolutePath)} ") } },
                 "Move selected to trash" to { withSelected("TRASH") { confirmDelete(it) } }
             )
         )
@@ -1653,6 +1867,7 @@ class MainActivity : Activity() {
             "View",
             listOf(
                 "Preview selected" to { withSelected("PREVIEW") { previewFile(it) } },
+                "Search current folder" to { promptSearch(contentPane().directory, "Search current folder") },
                 "Show right-pane path" to { showOutput("PWD", rightPane.directory.absolutePath) },
                 "Focus left pane" to { switchPanel(Panel.LEFT) },
                 "Focus right pane" to { switchPanel(Panel.RIGHT) },
@@ -1686,15 +1901,7 @@ class MainActivity : Activity() {
             showOutput(title, "No actions available")
             return
         }
-        val panel = LinearLayout(this)
-        panel.orientation = LinearLayout.VERTICAL
-        panel.setPadding(dp(12), dp(10), dp(12), dp(10))
-        panel.background = panelDrawable(PanelRole.OUTPUT)
-
-        val heading = label(title, max(14, outputTextSizeSp + 1), true)
-        heading.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-        heading.setTextColor(headerTextColor)
-        panel.addView(heading, LinearLayout.LayoutParams(-1, dp(34)))
+        val panel = dialogPanel(title)
 
         lateinit var dialog: AlertDialog
         for ((text, action) in items) {
@@ -1712,10 +1919,7 @@ class MainActivity : Activity() {
             panel.addView(row, params)
         }
 
-        dialog = AlertDialog.Builder(this).create()
-        dialog.setView(panel)
-        dialog.show()
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog = showDialogPanel(panel)
     }
 
     private fun withSelected(title: String, action: (File) -> Unit) {
@@ -1973,21 +2177,6 @@ class MainActivity : Activity() {
         return mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/")
     }
 
-    private fun seed(value: String) {
-        inputView?.setText(value)
-        inputView?.setSelection(inputView?.text?.length ?: 0)
-        refocusInput()
-    }
-
-    private fun refocusInput() {
-        inputView?.postDelayed({
-            inputView?.requestFocus()
-            inputView?.setSelection(inputView?.text?.length ?: 0)
-            val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
-            imm?.showSoftInput(inputView, InputMethodManager.SHOW_IMPLICIT)
-        }, 40)
-    }
-
     private fun homeDirectory(): File {
         val external = Environment.getExternalStorageDirectory()
         return if (external.exists()) external else File("/")
@@ -2036,10 +2225,10 @@ class MainActivity : Activity() {
 
     private fun applyThemeExtras(intent: Intent?) {
         val prefs = themePrefs()
-        val hasFontPayload = hasFontPayload(intent)
+        val shouldUseLauncherFontFallback = shouldUseLauncherFontFallback(intent)
         applyStoredTheme(prefs)
         applyThemePayload(intent)
-        if (!hasFontPayload && applyLauncherFontFallback()) {
+        if (shouldUseLauncherFontFallback && applyLauncherFontFallback()) {
             prefs.edit()
                 .putString(EXTRA_FONT_PATH, appFontPath)
                 .putString(EXTRA_FONT_NAME, appFontName)
@@ -2190,11 +2379,27 @@ class MainActivity : Activity() {
         cyberdeckMode = booleanExtra(intent, EXTRA_CYBERDECK_MODE, cyberdeckMode, "enable_cyberdeck_mode")
         crtFilter = booleanExtra(intent, EXTRA_CRT_FILTER, crtFilter, "enable_crt_filter")
         intent?.getStringExtra(EXTRA_TERMINAL_BG_IMAGE)?.let { terminalBackgroundImage = it }
-        intent?.getStringExtra(EXTRA_FONT_PATH)?.takeIf { it.isNotBlank() }?.let {
-            appFontPath = it
-            appFontName = null
+        var appliedFont = false
+        val fontFileExtra = stringExtra(intent, EXTRA_FONT_FILE, "launcher_font_file")
+        stringExtra(intent, EXTRA_FONT_PATH)?.takeIf { it.isNotBlank() }?.let {
+            val resolved = fontPathFromPayload(it, fontFileExtra)
+            if (!resolved.isNullOrBlank()) {
+                appFontPath = resolved
+                appFontName = null
+                appliedFont = true
+            }
         }
-        intent?.getStringExtra(EXTRA_FONT_NAME)?.takeIf { it.isNotBlank() }?.let {
+        if (!appliedFont) {
+            fontFileExtra
+                ?.takeIf { it.isNotBlank() }
+                ?.let { resolveLauncherFontFile(it) }
+                ?.let {
+                    appFontPath = importFontPath(it.absolutePath) ?: it.absolutePath
+                    appFontName = null
+                    appliedFont = true
+                }
+        }
+        if (!appliedFont) stringExtra(intent, EXTRA_FONT_NAME)?.takeIf { it.isNotBlank() }?.let {
             appFontName = it
             appFontPath = null
         }
@@ -2247,9 +2452,26 @@ class MainActivity : Activity() {
         return false
     }
 
-    private fun hasFontPayload(intent: Intent?): Boolean {
-        val extras = intent?.extras ?: return false
-        return extras.containsKey(EXTRA_FONT_PATH) || extras.containsKey(EXTRA_FONT_NAME)
+    private fun shouldUseLauncherFontFallback(intent: Intent?): Boolean {
+        if (intent?.extras == null) return true
+        val path = stringExtra(intent, EXTRA_FONT_PATH)
+        val fontFile = stringExtra(intent, EXTRA_FONT_FILE, "launcher_font_file")
+        val name = stringExtra(intent, EXTRA_FONT_NAME)
+        if (!path.isNullOrEmpty() && fontPathUsableForPayload(path, fontFile)) return false
+        if (!fontFile.isNullOrEmpty() && resolveLauncherFontFile(fontFile) != null) return false
+        if (!path.isNullOrEmpty()) return true
+        if (name.isNullOrEmpty()) return true
+        return name.equals("lucida_console", true)
+    }
+
+    private fun stringExtra(intent: Intent?, key: String, vararg aliases: String): String? {
+        val extras = intent?.extras ?: return null
+        val keys = arrayOf(key, *aliases)
+        for (candidate in keys) {
+            val value = extras.get(candidate)?.toString()?.trim()
+            if (!value.isNullOrEmpty()) return value
+        }
+        return null
     }
 
     private fun themePrefs(): SharedPreferences {
@@ -2299,13 +2521,79 @@ class MainActivity : Activity() {
         }
         val fontName = xmlValue(xml, "font_file")?.trim().orEmpty()
         if (fontName.isEmpty()) return false
-        val root = config.parentFile ?: return false
-        val font = listOf(File(root, fontName), File(File(root, "fonts"), fontName))
-            .firstOrNull { it.exists() && it.isFile && it.length() > 0 }
+        val font = resolveLauncherFontFile(fontName, config.parentFile)
             ?: return false
-        appFontPath = font.absolutePath
+        appFontPath = importFontPath(font.absolutePath) ?: font.absolutePath
         appFontName = null
         return true
+    }
+
+    private fun resolveLauncherFontFile(name: String, preferredRoot: File? = null): File? {
+        val cleanName = name.trim()
+        if (cleanName.isEmpty()) return null
+
+        val direct = File(cleanName)
+        if (direct.isAbsolute && fontFileUsable(direct)) return direct
+
+        val roots = ArrayList<File>()
+        preferredRoot?.let { roots.add(it) }
+        launcherUiFiles().mapNotNull { it.parentFile }.forEach { root ->
+            if (roots.none { it.absolutePath == root.absolutePath }) roots.add(root)
+        }
+
+        for (root in roots) {
+            val candidates = arrayOf(File(root, cleanName), File(File(root, "fonts"), cleanName))
+            for (candidate in candidates) {
+                if (fontFileUsable(candidate)) return candidate
+            }
+        }
+        return null
+    }
+
+    private fun fontPathFromPayload(path: String, fontFile: String?): String? {
+        if (!fontPathUsableForPayload(path, fontFile)) return null
+        return importFontPath(path) ?: path
+    }
+
+    private fun fontPathUsableForPayload(path: String, fontFile: String?): Boolean {
+        if (!fontPathMatchesFile(path, fontFile)) return false
+        return fontPathUsable(path)
+    }
+
+    private fun fontPathMatchesFile(path: String, fontFile: String?): Boolean {
+        val cleanFontFile = fontFile?.trim().orEmpty()
+        if (cleanFontFile.isEmpty()) return true
+        return File(path).name.equals(File(cleanFontFile).name, ignoreCase = true)
+    }
+
+    private fun importFontPath(path: String): String? {
+        return try {
+            val source = File(path)
+            if (!fontFileUsable(source)) return null
+            val fontDir = File(filesDir, "fonts")
+            if (!fontDir.exists() && !fontDir.mkdirs()) return null
+            val safeName = source.name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "retui-font" }
+            val target = File(fontDir, safeName)
+            if (source.absolutePath != target.absolutePath) {
+                source.copyTo(target, overwrite = true)
+                target.setLastModified(source.lastModified())
+            }
+            target.absolutePath
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun fontPathUsable(path: String): Boolean {
+        return fontFileUsable(File(path))
+    }
+
+    private fun fontFileUsable(file: File): Boolean {
+        return try {
+            file.exists() && file.isFile && file.length() > 0
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun launcherUiFiles(): List<File> {
@@ -2414,11 +2702,6 @@ class MainActivity : Activity() {
 
     private fun rowSelectionBackground(selected: Boolean): Drawable {
         return ColorDrawable(if (selected) withAlpha(selectionBgColor, 230) else Color.TRANSPARENT)
-    }
-
-    private fun quoteIfNeeded(path: String): String {
-        if (!path.any { it.isWhitespace() || it == '\'' || it == '"' }) return path
-        return "\"" + path.replace("\"", "\\\"") + "\""
     }
 
     private fun clamp(value: Int, min: Int, max: Int): Int {
@@ -2549,6 +2832,9 @@ class MainActivity : Activity() {
     companion object {
         const val EXTRA_PATH = "path"
         const val EXTRA_COMMAND = "command"
+        const val EXTRA_SEARCH = "search"
+        const val EXTRA_SEARCH_NAME = "search_name"
+        const val EXTRA_SEARCH_TYPE = "search_type"
         const val EXTRA_THEME_BG = "theme_bg"
         const val EXTRA_TERMINAL_BG = "terminal_bg"
         const val EXTRA_THEME_TEXT = "theme_text"
@@ -2587,6 +2873,7 @@ class MainActivity : Activity() {
         const val EXTRA_OUTPUT_CORNER_RADIUS = "output_corner_radius"
         const val EXTRA_HEADER_CORNER_RADIUS = "header_corner_radius"
         const val EXTRA_FONT_PATH = "font_path"
+        const val EXTRA_FONT_FILE = "font_file"
         const val EXTRA_FONT_NAME = "font_name"
         const val EXTRA_TERMINAL_BG_IMAGE = "terminal_bg_image"
         const val EXTRA_CYBERDECK_MODE = "cyberdeck_mode"
@@ -2600,6 +2887,20 @@ class MainActivity : Activity() {
         private const val RIGHT_GRID_CELL_HEIGHT_DP = 82
         private const val CATEGORY_FIRST_PAGE_ROWS = 90
         private const val TRASH_DIR_NAME = ".retui-trash"
+        private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "bmp", "avif")
+        private val VIDEO_EXTENSIONS = setOf("mp4", "mkv", "mov", "avi", "webm", "3gp", "m4v")
+        private val AUDIO_EXTENSIONS = setOf("mp3", "wav", "flac", "m4a", "ogg", "opus", "aac")
+        private val DOCUMENT_EXTENSIONS = setOf("txt", "md", "markdown", "pdf", "csv", "html", "xml", "json", "rtf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt")
+        private val ARCHIVE_EXTENSIONS = setOf("zip", "rar", "7z", "tar", "gz", "bz2", "xz", "jar")
+        private val DIRECTORY_TYPE_TOKENS = setOf("dir", "dirs", "directory", "directories", "folder", "folders")
+        private val SEARCH_TYPE_TOKENS = setOf(
+            "image", "images", "img", "photo", "photos",
+            "video", "videos", "movie", "movies",
+            "audio", "music", "sound",
+            "doc", "docs", "document", "documents", "text",
+            "apk", "apks", "android",
+            "archive", "archives"
+        ) + DIRECTORY_TYPE_TOKENS
         private val DOCUMENT_MIME_TYPES = setOf(
             "application/pdf",
             "text/plain",
@@ -2668,6 +2969,7 @@ class MainActivity : Activity() {
             EXTRA_OUTPUT_CORNER_RADIUS,
             EXTRA_HEADER_CORNER_RADIUS,
             EXTRA_FONT_PATH,
+            EXTRA_FONT_FILE,
             EXTRA_FONT_NAME,
             EXTRA_TERMINAL_BG_IMAGE,
             EXTRA_CYBERDECK_MODE,
