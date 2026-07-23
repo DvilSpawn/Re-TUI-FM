@@ -30,7 +30,7 @@ Run:
 ADB=/Users/mako/Library/Android/sdk/platform-tools/adb scripts/emulator_user_journeys.sh
 ```
 
-Original result: **7 passed, 3 failed**. After implementing the structured Launcher contract, UI multi-select, and navigable copy/paste flow, the expanded Pixel 7 suite is **19 passed, 0 failed**.
+Original result: **7 passed, 3 failed**. After implementing the structured Launcher contract, UI multi-select, navigable copy/paste, and anchored selection rendering, the expanded Pixel 7 suite is **22 passed, 0 failed**.
 
 | Journey | Result | Evidence |
 |---|---:|---|
@@ -42,6 +42,8 @@ Original result: **7 passed, 3 failed**. After implementing the structured Launc
 | Delete safely | Pass | confirmation shown before trashing |
 | Structured Launcher search/open | Pass | `action=search` and `action=open` reach the correct FM surfaces |
 | Multi-select | Pass | long-press selects the first item and taps toggle more items |
+| Anchored multi-select | Pass | first and additional selections retain the item’s existing Y-position |
+| Clear selection | Pass | closing the selection bar removes every selected highlight |
 | Copy and paste by navigation | Pass | Copy becomes Paste, survives navigation, confirms the destination, and copies every selected file |
 | Create ZIP archive | Pass | two selected files are written into a ZIP from the UI |
 | Bulk move | Pass | both selected files move and remain intact |

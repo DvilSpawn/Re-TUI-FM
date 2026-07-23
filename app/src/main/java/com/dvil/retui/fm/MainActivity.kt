@@ -108,6 +108,7 @@ class MainActivity : Activity() {
     private var selectionBar: LinearLayout? = null
     private val selectedPaths = LinkedHashSet<String>()
     private val pendingCopyPaths = ArrayList<String>()
+    private var showRightCursorHighlight = true
     private var currentScreen = Screen.HOME
     private var rightVirtualTitle: String? = null
     private var categoryLoadVersion = 0
@@ -286,7 +287,7 @@ class MainActivity : Activity() {
         row.gravity = Gravity.CENTER_VERTICAL
         row.setPadding(dp(6), dp(3), dp(6), dp(3))
         row.background = toolbarDrawable()
-        row.visibility = if (selectedPaths.isEmpty() && pendingCopyPaths.isEmpty()) View.GONE else View.VISIBLE
+        row.visibility = if (selectedPaths.isEmpty() && pendingCopyPaths.isEmpty()) View.INVISIBLE else View.VISIBLE
         updateSelectionBar()
         return row
     }
@@ -295,7 +296,7 @@ class MainActivity : Activity() {
         val row = selectionBar ?: return
         row.removeAllViews()
         val hasWork = selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty()
-        row.visibility = if (hasWork && currentScreen == Screen.TREE) View.VISIBLE else View.GONE
+        row.visibility = if (hasWork && currentScreen == Screen.TREE) View.VISIBLE else View.INVISIBLE
         if (!hasWork) return
         val countText = if (selectedPaths.isNotEmpty()) "${selectedPaths.size} selected" else "${pendingCopyPaths.size} ready to copy"
         val count = label(countText, max(10, outputTextSizeSp - 2), true)
@@ -465,11 +466,17 @@ class MainActivity : Activity() {
                 rightPane.cursor = position
                 clampCursor(rightPane)
                 val entry = rightPane.rows.getOrNull(position)
-                if (selectedPaths.isNotEmpty()) entry?.file?.let(::toggleSelection) else openSelected()
+                if (selectedPaths.isNotEmpty()) {
+                    entry?.file?.let(::toggleSelection)
+                } else {
+                    showRightCursorHighlight = true
+                    openSelected()
+                }
             }
             grid.setOnItemLongClickListener { _, _, position, _ ->
                 activePanel = Panel.RIGHT
                 rightPane.cursor = position
+                showRightCursorHighlight = false
                 rightPane.rows.getOrNull(position)?.takeUnless { it.isParent }?.file?.let(::toggleSelection)
                 true
             }
@@ -1034,7 +1041,9 @@ class MainActivity : Activity() {
     }
 
     private fun bindGridCell(cell: LinearLayout, entry: FileEntry, index: Int) {
-        val selected = entry.file?.absolutePath in selectedPaths || activePanel == Panel.RIGHT && index == rightPane.cursor
+        val selected = entry.file?.absolutePath in selectedPaths ||
+            selectedPaths.isEmpty() && pendingCopyPaths.isEmpty() && showRightCursorHighlight &&
+            activePanel == Panel.RIGHT && index == rightPane.cursor
         val color = rowTextColor(selected, entry.isDirectory)
         val iconColor = iconColor(selected)
         cell.background = rowSelectionBackground(selected)
@@ -1044,6 +1053,7 @@ class MainActivity : Activity() {
         holder.icon.setTextSize(max(28, outputTextSizeSp + 13).toFloat())
         holder.icon.typeface = nerdTypeface()
         holder.label.text = if (entry.isParent) ".." else entry.label
+        holder.label.isSelected = selected
         holder.label.setTextColor(color)
         holder.label.setTextSize(max(9, outputTextSizeSp - 3).toFloat())
         holder.label.setTypeface(appTypeface ?: Typeface.MONOSPACE, if (entry.isDirectory) Typeface.BOLD else Typeface.NORMAL)
@@ -1080,6 +1090,7 @@ class MainActivity : Activity() {
     private fun moveCursor(delta: Int) {
         val pane = activePane()
         if (pane.rows.isEmpty()) return
+        if (activePanel == Panel.RIGHT) showRightCursorHighlight = true
         val direction = if (delta < 0) -1 else 1
         var target = clamp(pane.cursor + delta, 0, pane.rows.size - 1)
         while (target in pane.rows.indices && pane.rows[target].isSection) target += direction
@@ -1093,12 +1104,14 @@ class MainActivity : Activity() {
 
     private fun cursorHome() {
         val pane = activePane()
+        if (activePanel == Panel.RIGHT) showRightCursorHighlight = true
         pane.cursor = pane.rows.indexOfFirst { !it.isSection }.takeIf { it >= 0 } ?: 0
         renderActivePane()
     }
 
     private fun cursorEnd() {
         val pane = activePane()
+        if (activePanel == Panel.RIGHT) showRightCursorHighlight = true
         pane.cursor = pane.rows.indexOfLast { !it.isSection }.takeIf { it >= 0 } ?: max(0, pane.rows.size - 1)
         renderActivePane()
     }
@@ -1190,6 +1203,7 @@ class MainActivity : Activity() {
             showOutput("CD", "Cannot read: ${dir.absolutePath}")
             return
         }
+        showRightCursorHighlight = true
         selectedPaths.clear()
         updateSelectionBar()
         if (currentScreen != Screen.TREE) {
@@ -1212,6 +1226,7 @@ class MainActivity : Activity() {
             showOutput("CD", "Cannot read: ${dir.absolutePath}")
             return
         }
+        showRightCursorHighlight = true
         selectedPaths.clear()
         updateSelectionBar()
         if (currentScreen != Screen.TREE) {
@@ -1240,6 +1255,7 @@ class MainActivity : Activity() {
 
     private fun switchPanel(panel: Panel) {
         activePanel = panel
+        if (panel == Panel.RIGHT) showRightCursorHighlight = true
         renderAll()
     }
 
@@ -1337,29 +1353,42 @@ class MainActivity : Activity() {
 
     private fun toggleSelection(file: File) {
         if (!file.exists() || file.name == TRASH_DIR_NAME) return
+        showRightCursorHighlight = false
         if (selectedPaths.isEmpty()) pendingCopyPaths.clear()
         if (!selectedPaths.add(file.absolutePath)) selectedPaths.remove(file.absolutePath)
         updateSelectionBar()
-        renderPane(Panel.RIGHT)
+        refreshSelectionHighlights()
+    }
+
+    private fun refreshSelectionHighlights() {
+        val grid = rightGridView ?: return
+        val first = grid.firstVisiblePosition
+        repeat(grid.childCount) { offset ->
+            val position = first + offset
+            val cell = grid.getChildAt(offset) as? LinearLayout ?: return@repeat
+            rightPane.rows.getOrNull(position)?.let { bindGridCell(cell, it, position) }
+        }
     }
 
     private fun selectedFiles(): List<File> = selectedPaths.map(::File).filter(File::exists)
 
     private fun clearSelection() {
+        showRightCursorHighlight = false
         selectedPaths.clear()
         pendingCopyPaths.clear()
         updateSelectionBar()
-        renderPane(Panel.RIGHT)
+        refreshSelectionHighlights()
     }
 
     private fun prepareCopy() {
         val files = selectedFiles()
         if (files.isEmpty()) return clearSelection()
         pendingCopyPaths.clear()
+        showRightCursorHighlight = false
         pendingCopyPaths.addAll(files.map { it.absolutePath })
         selectedPaths.clear()
         updateSelectionBar()
-        renderPane(Panel.RIGHT)
+        refreshSelectionHighlights()
         Toast.makeText(this, "Navigate to a folder and tap PASTE", Toast.LENGTH_SHORT).show()
     }
 

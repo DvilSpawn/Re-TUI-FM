@@ -15,7 +15,7 @@ launch() {
   adb shell am force-stop "$PACKAGE" >/dev/null
   adb shell am start -W -a "$ACTION" -p "$PACKAGE" \
     --es path "$ROOT" --es command "'$1'" >/dev/null
-  sleep 1
+  sleep 2
 }
 
 launch_action() {
@@ -23,7 +23,7 @@ launch_action() {
   adb shell am force-stop "$PACKAGE" >/dev/null
   adb shell am start -W -a "$ACTION" -p "$PACKAGE" \
     --es action "$action" --es path "$path" >/dev/null
-  sleep 1
+  sleep 2
 }
 
 ui_text() {
@@ -70,6 +70,22 @@ long_press_text() {
   return 1
 }
 
+item_top() {
+  local expected=$1 xml
+  xml=$(ui_text)
+  if [[ $xml =~ text=\"$expected\"[^\>]*bounds=\"\[[0-9]+,([0-9]+)\] ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+item_selected() {
+  local expected=$1 state=$2 xml
+  xml=$(ui_text)
+  [[ $xml =~ text=\"$expected\"[^\>]*selected=\"$state\" ]]
+}
+
 serial=$($ADB_BIN devices | awk '$2 == "device" && $1 ~ /^emulator-/ { print $1; exit }')
 if [[ -z "$serial" ]]; then
   printf 'No running Android emulator found.\n' >&2
@@ -81,8 +97,10 @@ adb wait-for-device
 adb shell appops set "$PACKAGE" MANAGE_EXTERNAL_STORAGE allow >/dev/null 2>&1 || true
 adb shell rm -rf "$ROOT"
 adb shell mkdir -p "$ROOT/inbox" "$ROOT/archive"
+adb shell mkdir -p "$ROOT/scroll"
 printf 'hello from RETUI FM\n' | adb shell sh -c "'cat > $ROOT/inbox/note.txt'"
 printf 'second selected file\n' | adb shell sh -c "'cat > $ROOT/inbox/second.txt'"
+adb shell sh -c "'i=1; while [ \$i -le 24 ]; do touch $ROOT/scroll/item-\$(printf %02d \$i).txt; i=\$((i + 1)); done'"
 
 launch 'mkdir projects'
 expect_file 'create a folder' "$ROOT/projects"
@@ -100,7 +118,7 @@ expect_ui 'preview a text file' 'hello from RETUI FM'
 adb shell am force-stop "$PACKAGE" >/dev/null
 adb shell am start -W -a "$ACTION" -p "$PACKAGE" --es action search \
   --es path "$ROOT" --es search_name moved >/dev/null
-sleep 1
+sleep 2
 expect_ui 'search by file name' 'moved.txt'
 
 launch 'rm archive/moved.txt'
@@ -128,6 +146,34 @@ if tap_text ZIP; then
   fi
 else
   fail 'create ZIP from multiple selected files' 'ZIP action not found'
+fi
+
+launch_action open "$ROOT/scroll"
+before=$(item_top item-10.txt || true)
+if long_press_text item-10.txt; then
+  after_first=$(item_top item-10.txt || true)
+  if [[ -z "$before" || "$before" != "$after_first" ]]; then
+    fail 'first selection keeps the right pane anchored' "item moved from y=$before to y=$after_first"
+  else
+    pass 'first selection keeps the right pane anchored'
+  fi
+  if tap_text item-11.txt; then
+    after=$(item_top item-10.txt || true)
+    if [[ -n "$after_first" && "$after_first" == "$after" ]]; then
+      pass 'additional selection keeps the right pane anchored'
+    else
+      fail 'additional selection keeps the right pane anchored' "item moved from y=$after_first to y=$after"
+    fi
+    if tap_text X && item_selected item-10.txt false && item_selected item-11.txt false; then
+      pass 'closing selection clears every item highlight'
+    else
+      fail 'closing selection clears every item highlight' 'an item remained visually selected'
+    fi
+  else
+    fail 'additional selection keeps the right pane anchored' 'second visible item not found'
+  fi
+else
+  fail 'additional selection keeps the right pane anchored' 'first visible item not found'
 fi
 
 launch_action open "$ROOT/inbox"
