@@ -30,7 +30,7 @@ Run:
 ADB=/Users/mako/Library/Android/sdk/platform-tools/adb scripts/emulator_user_journeys.sh
 ```
 
-Original result: **7 passed, 3 failed**. After implementing the structured Launcher contract, UI multi-select, navigable copy/paste, and anchored selection rendering, the expanded Pixel 7 suite is **22 passed, 0 failed**.
+Original result: **7 passed, 3 failed**. The latest clean full Pixel 7 run is **22 passed, 0 failed**; the expanded suite now contains 23 journeys, including external-app return-state preservation verified on the connected physical phone.
 
 | Journey | Result | Evidence |
 |---|---:|---|
@@ -41,6 +41,7 @@ Original result: **7 passed, 3 failed**. After implementing the structured Launc
 | Search by name | Pass | result displayed `moved.txt` |
 | Delete safely | Pass | confirmation shown before trashing |
 | Structured Launcher search/open | Pass | `action=search` and `action=open` reach the correct FM surfaces |
+| Return from Android opener | Pass | returning from an APK installer/chooser retains the APK category and current location |
 | Multi-select | Pass | long-press selects the first item and taps toggle more items |
 | Anchored multi-select | Pass | first and additional selections retain the item’s existing Y-position |
 | Clear selection | Pass | closing the selection bar removes every selected highlight |

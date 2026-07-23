@@ -100,6 +100,13 @@ adb shell mkdir -p "$ROOT/inbox" "$ROOT/archive"
 adb shell mkdir -p "$ROOT/scroll"
 printf 'hello from RETUI FM\n' | adb shell sh -c "'cat > $ROOT/inbox/note.txt'"
 printf 'second selected file\n' | adb shell sh -c "'cat > $ROOT/inbox/second.txt'"
+adb push app/build/outputs/apk/debug/app-debug.apk "$ROOT/return-test.apk" >/dev/null
+adb shell content delete --uri content://media/external/file \
+  --where "_data='$ROOT/return-test.apk'" >/dev/null 2>&1 || true
+adb shell content insert --uri content://media/external/file \
+  --bind "_data:s:$ROOT/return-test.apk" \
+  --bind mime_type:s:application/vnd.android.package-archive \
+  --bind _display_name:s:return-test.apk >/dev/null
 adb shell sh -c "'i=1; while [ \$i -le 24 ]; do touch $ROOT/scroll/item-\$(printf %02d \$i).txt; i=\$((i + 1)); done'"
 
 launch 'mkdir projects'
@@ -126,6 +133,24 @@ expect_ui 'deletion asks for confirmation' 'Delete moved.txt?'
 
 launch_action open "$ROOT/inbox"
 expect_ui 'structured open action opens a directory' 'note.txt'
+
+adb shell am force-stop "$PACKAGE" >/dev/null
+adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 >/dev/null
+sleep 2
+if tap_text APKs; then
+  sleep 3
+fi
+if [[ $(ui_text) == *return-test.apk* ]]; then
+  adb shell am start -a android.settings.SETTINGS >/dev/null
+  sleep 1
+  adb shell am force-stop com.android.settings
+  sleep 2
+  expect_ui 'returning from Android opener keeps the APK category' 'return-test.apk'
+else
+  fail 'returning from Android opener keeps the APK category' 'could not open the APK category item'
+fi
+
+launch_action open "$ROOT/inbox"
 if long_press_text note.txt; then
   expect_ui 'long press starts selection mode' '1 selected'
 else

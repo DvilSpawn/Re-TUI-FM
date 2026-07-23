@@ -111,6 +111,7 @@ class MainActivity : Activity() {
     private var showRightCursorHighlight = true
     private var currentScreen = Screen.HOME
     private var rightVirtualTitle: String? = null
+    private var activeCategory: FileCategory? = null
     private var categoryLoadVersion = 0
     private var homeCountVersion = 0
     private var findVersion = 0
@@ -207,7 +208,7 @@ class MainActivity : Activity() {
         if (firstResume) {
             firstResume = false
         } else if (::leftPane.isInitialized) {
-            reloadAll()
+            activeCategory?.let(::showCategoryFiles) ?: reloadAll()
         }
     }
 
@@ -831,6 +832,7 @@ class MainActivity : Activity() {
     }
 
     private fun showCategoryFiles(category: FileCategory) {
+        activeCategory = category
         val loadVersion = ++categoryLoadVersion
         showCategoryRows(category, listOf(FileEntry(null, "Loading ${category.label.lowercase(Locale.US)}...", false)))
         Thread {
@@ -1262,6 +1264,7 @@ class MainActivity : Activity() {
     private fun clearVirtualCategory() {
         categoryLoadVersion++
         rightVirtualTitle = null
+        activeCategory = null
     }
 
     private fun previewFile(file: File, contentUri: Uri? = null) {
