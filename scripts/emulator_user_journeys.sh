@@ -132,6 +132,28 @@ fi
 
 launch_action open "$ROOT/inbox"
 long_press_text note.txt && tap_text second.txt
+if tap_text COPY; then
+  expect_ui 'copy changes the action to paste' 'PASTE'
+  adb shell input keyevent BACK
+  sleep 1
+  if tap_text projects; then
+    expect_ui 'pending copy survives folder navigation' 'PASTE'
+    if tap_text PASTE && tap_text PASTE; then
+      sleep 2
+      expect_file 'paste copies the first selected file' "$ROOT/projects/note.txt"
+      expect_file 'paste copies every selected file' "$ROOT/projects/second.txt"
+    else
+      fail 'paste selected files' 'PASTE action or confirmation not found'
+    fi
+  else
+    fail 'pending copy survives folder navigation' 'destination folder not found'
+  fi
+else
+  fail 'copy changes the action to paste' 'COPY action not found'
+fi
+
+launch_action open "$ROOT/inbox"
+long_press_text note.txt && tap_text second.txt
 if tap_text MOVE; then
   adb shell input text "$ROOT/archive"
   if tap_text MOVE; then

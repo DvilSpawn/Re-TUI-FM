@@ -107,6 +107,7 @@ class MainActivity : Activity() {
     private var addressPathView: TextView? = null
     private var selectionBar: LinearLayout? = null
     private val selectedPaths = LinkedHashSet<String>()
+    private val pendingCopyPaths = ArrayList<String>()
     private var currentScreen = Screen.HOME
     private var rightVirtualTitle: String? = null
     private var categoryLoadVersion = 0
@@ -190,6 +191,7 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         selectedPaths.clear()
+        pendingCopyPaths.clear()
         applyThemeExtras(intent)
         val start = resolveStartDirectory(intent)
         leftPane = PaneState(start)
@@ -284,7 +286,7 @@ class MainActivity : Activity() {
         row.gravity = Gravity.CENTER_VERTICAL
         row.setPadding(dp(6), dp(3), dp(6), dp(3))
         row.background = toolbarDrawable()
-        row.visibility = if (selectedPaths.isEmpty()) View.GONE else View.VISIBLE
+        row.visibility = if (selectedPaths.isEmpty() && pendingCopyPaths.isEmpty()) View.GONE else View.VISIBLE
         updateSelectionBar()
         return row
     }
@@ -292,17 +294,23 @@ class MainActivity : Activity() {
     private fun updateSelectionBar() {
         val row = selectionBar ?: return
         row.removeAllViews()
-        row.visibility = if (selectedPaths.isEmpty()) View.GONE else View.VISIBLE
-        if (selectedPaths.isEmpty()) return
-        val count = label("${selectedPaths.size} selected", max(10, outputTextSizeSp - 2), true)
+        val hasWork = selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty()
+        row.visibility = if (hasWork && currentScreen == Screen.TREE) View.VISIBLE else View.GONE
+        if (!hasWork) return
+        val countText = if (selectedPaths.isNotEmpty()) "${selectedPaths.size} selected" else "${pendingCopyPaths.size} ready to copy"
+        val count = label(countText, max(10, outputTextSizeSp - 2), true)
         count.gravity = Gravity.CENTER_VERTICAL
         count.setTextColor(moduleTextColor)
         row.addView(count, LinearLayout.LayoutParams(0, -1, 1f))
-        addSelectionAction(row, "COPY") { promptBulkDestination(false) }
-        addSelectionAction(row, "MOVE") { promptBulkDestination(true) }
-        addSelectionAction(row, "TRASH") { confirmBulkTrash() }
-        addSelectionAction(row, "SHARE") { shareSelectedFiles() }
-        addSelectionAction(row, "ZIP") { promptZipSelected() }
+        if (selectedPaths.isNotEmpty()) {
+            addSelectionAction(row, "COPY") { prepareCopy() }
+            addSelectionAction(row, "MOVE") { promptMoveDestination() }
+            addSelectionAction(row, "TRASH") { confirmBulkTrash() }
+            addSelectionAction(row, "SHARE") { shareSelectedFiles() }
+            addSelectionAction(row, "ZIP") { promptZipSelected() }
+        } else {
+            addSelectionAction(row, "PASTE") { confirmPaste() }
+        }
         addSelectionAction(row, "X") { clearSelection() }
     }
 
@@ -495,9 +503,9 @@ class MainActivity : Activity() {
 
     private fun showHome() {
         selectedPaths.clear()
-        updateSelectionBar()
         clearVirtualCategory()
         currentScreen = Screen.HOME
+        updateSelectionBar()
         homeCountVersion++
         addressPathView?.text = "HOME"
         leftRowsView = null
@@ -514,6 +522,7 @@ class MainActivity : Activity() {
 
     private fun showTree(dir: File = rightPane.directory) {
         currentScreen = Screen.TREE
+        updateSelectionBar()
         homeCountVersion++
         contentHost?.removeAllViews()
         contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
@@ -1328,6 +1337,7 @@ class MainActivity : Activity() {
 
     private fun toggleSelection(file: File) {
         if (!file.exists() || file.name == TRASH_DIR_NAME) return
+        if (selectedPaths.isEmpty()) pendingCopyPaths.clear()
         if (!selectedPaths.add(file.absolutePath)) selectedPaths.remove(file.absolutePath)
         updateSelectionBar()
         renderPane(Panel.RIGHT)
@@ -1337,14 +1347,48 @@ class MainActivity : Activity() {
 
     private fun clearSelection() {
         selectedPaths.clear()
+        pendingCopyPaths.clear()
         updateSelectionBar()
         renderPane(Panel.RIGHT)
     }
 
-    private fun promptBulkDestination(move: Boolean) {
+    private fun prepareCopy() {
         val files = selectedFiles()
         if (files.isEmpty()) return clearSelection()
-        val panel = dialogPanel(if (move) "Move ${files.size} items" else "Copy ${files.size} items")
+        pendingCopyPaths.clear()
+        pendingCopyPaths.addAll(files.map { it.absolutePath })
+        selectedPaths.clear()
+        updateSelectionBar()
+        renderPane(Panel.RIGHT)
+        Toast.makeText(this, "Navigate to a folder and tap PASTE", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun confirmPaste() {
+        val files = pendingCopyPaths.map(::File).filter(File::exists)
+        if (files.isEmpty()) return clearSelection()
+        val destination = rightPane.directory
+        val panel = dialogPanel("Paste ${files.size} items here?")
+        val path = label(destination.absolutePath, max(10, outputTextSizeSp - 2), false)
+        path.gravity = Gravity.CENTER_VERTICAL or Gravity.START
+        path.setSingleLine(false)
+        path.setTextColor(withAlpha(outputTextColor, 190))
+        path.setPadding(dp(8), dp(8), dp(8), dp(8))
+        panel.addView(path, LinearLayout.LayoutParams(-1, -2))
+        lateinit var dialog: AlertDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "NOT HERE") { dialog.dismiss() }
+        addDialogButton(buttons, "PASTE") {
+            dialog.dismiss()
+            runBulkTransfer(files, destination, false)
+        }
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
+        dialog = showDialogPanel(panel)
+    }
+
+    private fun promptMoveDestination() {
+        val files = selectedFiles()
+        if (files.isEmpty()) return clearSelection()
+        val panel = dialogPanel("Move ${files.size} items")
         val input = EditText(this)
         input.setSingleLine(true)
         input.typeface = appTypeface
@@ -1358,14 +1402,14 @@ class MainActivity : Activity() {
         lateinit var dialog: AlertDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
-        addDialogButton(buttons, if (move) "MOVE" else "COPY") {
+        addDialogButton(buttons, "MOVE") {
             val destination = File(input.text.toString().trim())
             if (!destination.isDirectory) {
                 input.error = "Choose an existing folder"
                 return@addDialogButton
             }
             dialog.dismiss()
-            runBulkTransfer(files, destination, move)
+            runBulkTransfer(files, destination, true)
         }
         panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
         dialog = showDialogPanel(panel, input)
@@ -1401,6 +1445,7 @@ class MainActivity : Activity() {
             }
             runOnUiThread {
                 selectedPaths.clear()
+                pendingCopyPaths.clear()
                 reloadAll()
                 updateSelectionBar()
                 showOutput(if (move) "MOVE" else "COPY", failure ?: "$completed items completed")
@@ -1419,6 +1464,7 @@ class MainActivity : Activity() {
             dialog.dismiss()
             val moved = files.count(::moveToTrash)
             selectedPaths.clear()
+            pendingCopyPaths.clear()
             reloadAll()
             updateSelectionBar()
             showOutput("TRASH", "$moved of ${files.size} items moved to trash")
@@ -1491,6 +1537,7 @@ class MainActivity : Activity() {
             }
             runOnUiThread {
                 selectedPaths.clear()
+                pendingCopyPaths.clear()
                 reloadAll()
                 updateSelectionBar()
                 showOutput("ZIP", failure ?: "Created ${target.absolutePath}")

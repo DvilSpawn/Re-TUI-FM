@@ -41,7 +41,7 @@ The older `command` extra remains temporarily supported for installed Launcher v
 
 ## Multi-select
 
-Long-press a file or folder to begin selection, tap more items to toggle them, then use the visible selection bar: `COPY`, `MOVE`, `TRASH`, `SHARE`, `ZIP`, or `X` to clear. Back also exits selection mode before navigating.
+Long-press a file or folder to begin selection, then tap more items to toggle them. `COPY` changes the bar to `PASTE`; navigate to the destination folder, tap `PASTE`, and confirm that directory. The other selection actions are `MOVE`, `TRASH`, `SHARE`, `ZIP`, and `X` to clear. Back exits active selection before navigating, while a pending copy remains available as you browse.
 
 ## Permissions
 
