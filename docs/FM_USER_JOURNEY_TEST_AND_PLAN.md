@@ -47,8 +47,10 @@ Original result: **7 passed, 3 failed**. The latest clean full Pixel 7 run is **
 | Clear selection | Pass | closing the selection bar removes every selected highlight |
 | Copy and paste by navigation | Pass | Copy becomes Paste, survives navigation, confirms the destination, and copies every selected file |
 | Create ZIP archive | Pass | two selected files are written into a ZIP from the UI |
-| Bulk move | Pass | both selected files move and remain intact |
+| Bulk move by navigation | Pass | Move becomes Move Here, survives folder navigation, confirms the current directory, and moves every selected file |
 | Bulk trash | Pass | both selected files leave the source and enter guarded trash flow |
+
+Touch-action audit: Copy and Move no longer accept typed destination paths. The remaining UI text fields collect values that cannot be selected by browsing: folder names, ZIP names, and search queries. Raw path arguments remain available only through the separate Launcher command contract.
 
 ## Shortcomings found
 

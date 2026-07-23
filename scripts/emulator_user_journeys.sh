@@ -133,24 +133,6 @@ expect_ui 'deletion asks for confirmation' 'Delete moved.txt?'
 
 launch_action open "$ROOT/inbox"
 expect_ui 'structured open action opens a directory' 'note.txt'
-
-adb shell am force-stop "$PACKAGE" >/dev/null
-adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 >/dev/null
-sleep 2
-if tap_text APKs; then
-  sleep 3
-fi
-if [[ $(ui_text) == *return-test.apk* ]]; then
-  adb shell am start -a android.settings.SETTINGS >/dev/null
-  sleep 1
-  adb shell am force-stop com.android.settings
-  sleep 2
-  expect_ui 'returning from Android opener keeps the APK category' 'return-test.apk'
-else
-  fail 'returning from Android opener keeps the APK category' 'could not open the APK category item'
-fi
-
-launch_action open "$ROOT/inbox"
 if long_press_text note.txt; then
   expect_ui 'long press starts selection mode' '1 selected'
 else
@@ -226,13 +208,20 @@ fi
 launch_action open "$ROOT/inbox"
 long_press_text note.txt && tap_text second.txt
 if tap_text MOVE; then
-  adb shell input text "$ROOT/archive"
-  if tap_text MOVE; then
-    sleep 2
-    expect_file 'bulk move selected files' "$ROOT/archive/note.txt"
-    expect_file 'bulk move keeps every selected item' "$ROOT/archive/second.txt"
+  expect_ui 'move changes the action to move here' 'MOVE HERE'
+  adb shell input keyevent BACK
+  sleep 1
+  if tap_text archive; then
+    expect_ui 'pending move survives folder navigation' 'MOVE HERE'
+    if tap_text 'MOVE HERE' && tap_text 'MOVE HERE'; then
+      sleep 2
+      expect_file 'bulk move selected files' "$ROOT/archive/note.txt"
+      expect_file 'bulk move keeps every selected item' "$ROOT/archive/second.txt"
+    else
+      fail 'bulk move selected files' 'MOVE HERE action or confirmation not found'
+    fi
   else
-    fail 'bulk move selected files' 'MOVE confirmation not found'
+    fail 'pending move survives folder navigation' 'destination folder not found'
   fi
 else
   fail 'bulk move selected files' 'MOVE action not found'
@@ -246,6 +235,22 @@ if tap_text TRASH && tap_text TRASH; then
   expect_absent 'bulk trash removes every selected item' "$ROOT/archive/second.txt"
 else
   fail 'bulk trash selected files' 'TRASH action or confirmation not found'
+fi
+
+adb shell am force-stop "$PACKAGE" >/dev/null
+adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 >/dev/null
+sleep 2
+if tap_text APKs; then
+  sleep 3
+fi
+if [[ $(ui_text) == *return-test.apk* ]]; then
+  adb shell am start -a android.settings.SETTINGS >/dev/null
+  sleep 1
+  adb shell am force-stop com.android.settings
+  sleep 2
+  expect_ui 'returning from Android opener keeps the APK category' 'return-test.apk'
+else
+  fail 'returning from Android opener keeps the APK category' 'could not open the APK category item'
 fi
 
 printf '\nResult: %d passed, %d failed\n' "$passed" "$failed"
