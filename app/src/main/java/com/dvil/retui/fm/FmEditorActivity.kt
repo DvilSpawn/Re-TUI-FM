@@ -105,7 +105,6 @@ class FmEditorActivity : Activity() {
         val rootParams = FrameLayout.LayoutParams(-1, -1)
         rootParams.setMargins(dp(28), dp(34), dp(28), dp(28))
         screen.addView(root, rootParams)
-        bindImeAwarePanelMargin(screen, root, rootParams)
 
         val header = label("DOCUMENTS", headerTextSizeSp, true)
         header.gravity = Gravity.CENTER
@@ -116,6 +115,7 @@ class FmEditorActivity : Activity() {
         headerParams.leftMargin = dp(64)
         headerParams.topMargin = dp(24)
         screen.addView(header, headerParams)
+        bindImeAwarePanelMargin(screen, root, rootParams, header, headerParams)
         bindPanelCutouts(root, header)
 
         val name = label(file!!.name.uppercase(), outputTextSizeSp + 1, true)
@@ -171,6 +171,9 @@ class FmEditorActivity : Activity() {
         )
         window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
         window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -267,18 +270,31 @@ class FmEditorActivity : Activity() {
     private fun bindImeAwarePanelMargin(
         screen: View,
         panel: View,
-        params: FrameLayout.LayoutParams
+        params: FrameLayout.LayoutParams,
+        header: View,
+        headerParams: FrameLayout.LayoutParams
     ) {
         val baseLeft = params.leftMargin
         val baseTop = params.topMargin
         val baseRight = params.rightMargin
         val baseBottom = params.bottomMargin
+        val baseHeaderLeft = headerParams.leftMargin
+        val baseHeaderTop = headerParams.topMargin
         ViewCompat.setOnApplyWindowInsetsListener(screen) { _, insets ->
+            val safe = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
-            val nav = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
-            val keyboardLift = max(0, ime - nav)
-            params.setMargins(baseLeft, baseTop, baseRight, baseBottom + keyboardLift)
+            params.setMargins(
+                baseLeft + safe.left,
+                baseTop + safe.top,
+                baseRight + safe.right,
+                baseBottom + max(safe.bottom, ime)
+            )
             panel.layoutParams = params
+            headerParams.leftMargin = baseHeaderLeft + safe.left
+            headerParams.topMargin = baseHeaderTop + safe.top
+            header.layoutParams = headerParams
             insets
         }
         screen.post { ViewCompat.requestApplyInsets(screen) }

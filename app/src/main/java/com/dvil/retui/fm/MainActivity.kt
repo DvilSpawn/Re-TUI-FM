@@ -56,6 +56,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
     private enum class Panel { LEFT, RIGHT }
@@ -241,6 +242,9 @@ class MainActivity : Activity() {
         window.setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN)
         window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
         window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -354,7 +358,7 @@ class MainActivity : Activity() {
             systemInsetTop = safeInsets[1]
             systemInsetRight = safeInsets[2]
             systemInsetBottom = safeInsets[3]
-            root.setPadding(systemInsetLeft, systemInsetTop, systemInsetRight, systemInsetBottom)
+            root.setPadding(systemInsetLeft, 0, systemInsetRight, systemInsetBottom)
             updateMainMargins()
             insets
         }
@@ -369,7 +373,7 @@ class MainActivity : Activity() {
     private fun applyMainMargins(params: FrameLayout.LayoutParams) {
         params.setMargins(
             dp(8) + displayMarginLeftPx,
-            dp(topMarginDp) + displayMarginTopPx,
+            systemInsetTop + dp(topMarginDp) + displayMarginTopPx,
             dp(8) + displayMarginRightPx,
             dp(8) + displayMarginBottomPx
         )
@@ -2859,7 +2863,7 @@ class MainActivity : Activity() {
 
     private fun mmToPx(mm: Float): Int {
         val px = mm * resources.displayMetrics.xdpi / 25.4f
-        return max(0, (px + 0.5f).toInt())
+        return px.roundToInt()
     }
 
     private fun applyLauncherFontFallback(): Boolean {
