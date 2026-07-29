@@ -969,11 +969,18 @@ class MainActivity : Activity() {
         return try {
             contentResolver.query(
                 category.uri,
-                arrayOf(MediaStore.MediaColumns._ID),
+                arrayOf(MediaStore.MediaColumns.DATA),
                 selection,
                 args,
                 null
-            )?.use { it.count } ?: 0
+            )?.use { cursor ->
+                var count = 0
+                while (cursor.moveToNext()) {
+                    val file = cursor.getString(0)?.let(::File) ?: continue
+                    if (file.exists() && !isUnderTrash(file)) count++
+                }
+                count
+            } ?: 0
         } catch (_: Exception) {
             0
         }
@@ -1001,7 +1008,7 @@ class MainActivity : Activity() {
                     val uri = ContentUris.withAppendedId(category.uri, cursor.getLong(0))
                     val path = cursor.getString(1) ?: continue
                     val file = File(path)
-                    if (file.exists() && file.isFile) {
+                    if (file.exists() && file.isFile && !isUnderTrash(file)) {
                         out.add(FileEntry(file, file.name, false, contentUri = uri))
                         if (!firstPageSent && out.size >= CATEGORY_FIRST_PAGE_ROWS) {
                             firstPageSent = true
@@ -2115,6 +2122,15 @@ class MainActivity : Activity() {
 
     private fun isInTrash(file: File): Boolean {
         return file.parentFile?.name == TRASH_DIR_NAME
+    }
+
+    private fun isUnderTrash(file: File): Boolean {
+        var parent = file.parentFile
+        while (parent != null) {
+            if (parent.name == TRASH_DIR_NAME) return true
+            parent = parent.parentFile
+        }
+        return false
     }
 
     private fun restoreFromTrash(file: File) {
