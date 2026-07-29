@@ -61,6 +61,7 @@ import kotlin.math.roundToInt
 class MainActivity : Activity() {
     private enum class Panel { LEFT, RIGHT }
     private enum class Screen { HOME, TREE }
+    private enum class SortMode { NAME_ASC, NAME_DESC, MODIFIED_NEWEST, MODIFIED_OLDEST }
 
     private data class FileEntry(
         val file: File?,
@@ -100,6 +101,8 @@ class MainActivity : Activity() {
     private var leftScrollView: ScrollView? = null
     private var rightGridView: GridView? = null
     private var rightGridAdapter: BaseAdapter? = null
+    private var rightNameSortView: ImageView? = null
+    private var rightModifiedSortView: ImageView? = null
     private var contentHost: FrameLayout? = null
     private var leftFooterView: TextView? = null
     private var rightFooterView: TextView? = null
@@ -112,6 +115,7 @@ class MainActivity : Activity() {
     private var pendingApkPath: String? = null
     private val pendingMovePaths = ArrayList<String>()
     private var showRightCursorHighlight = true
+    private var rightSortMode = SortMode.NAME_ASC
     private var currentScreen = Screen.HOME
     private var rightVirtualTitle: String? = null
     private var activeCategory: FileCategory? = null
@@ -476,6 +480,7 @@ class MainActivity : Activity() {
             leftRowsView = rows
             leftScrollView = scroll
         } else {
+            pane.addView(buildRightSortBar(), LinearLayout.LayoutParams(-1, dp(30)))
             val grid = GridView(this)
             grid.stretchMode = GridView.STRETCH_COLUMN_WIDTH
             grid.horizontalSpacing = dp(4)
@@ -521,6 +526,57 @@ class MainActivity : Activity() {
             rightDiskView = disk
         }
         return pane
+    }
+
+    private fun buildRightSortBar(): View {
+        val bar = LinearLayout(this)
+        bar.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        bar.setPadding(dp(4), 0, dp(4), 0)
+        bar.background = ColorDrawable(headerPanelColor)
+        rightNameSortView = addSortButton(bar, android.R.drawable.ic_menu_sort_alphabetically, "Sort by name") {
+            rightSortMode = if (rightSortMode == SortMode.NAME_ASC) SortMode.NAME_DESC else SortMode.NAME_ASC
+            sortRightPane()
+        }
+        rightModifiedSortView = addSortButton(bar, android.R.drawable.ic_menu_recent_history, "Sort by modified date") {
+            rightSortMode = if (rightSortMode == SortMode.MODIFIED_NEWEST) SortMode.MODIFIED_OLDEST else SortMode.MODIFIED_NEWEST
+            sortRightPane()
+        }
+        updateSortButtons()
+        return bar
+    }
+
+    private fun addSortButton(parent: LinearLayout, icon: Int, description: String, action: () -> Unit): ImageView {
+        val view = ImageView(this)
+        view.setImageResource(icon)
+        view.setColorFilter(headerTextColor)
+        view.contentDescription = description
+        view.tooltipText = description
+        view.setPadding(dp(4), dp(2), dp(4), dp(2))
+        view.setOnClickListener { action() }
+        parent.addView(view, LinearLayout.LayoutParams(dp(40), -1))
+        return view
+    }
+
+    private fun updateSortButtons() {
+        rightNameSortView?.apply {
+            alpha = if (rightSortMode == SortMode.NAME_ASC || rightSortMode == SortMode.NAME_DESC) 1f else 0.5f
+            rotation = if (rightSortMode == SortMode.NAME_DESC) 180f else 0f
+            contentDescription = if (rightSortMode == SortMode.NAME_DESC) "Name descending" else "Name ascending"
+        }
+        rightModifiedSortView?.apply {
+            alpha = if (rightSortMode == SortMode.MODIFIED_NEWEST || rightSortMode == SortMode.MODIFIED_OLDEST) 1f else 0.5f
+            rotation = if (rightSortMode == SortMode.MODIFIED_OLDEST) 180f else 0f
+            contentDescription = if (rightSortMode == SortMode.MODIFIED_OLDEST) "Oldest modified first" else "Recently modified first"
+        }
+    }
+
+    private fun sortRightPane() {
+        val sorted = sortedEntries(rightPane.rows)
+        rightPane.rows.clear()
+        rightPane.rows.addAll(sorted)
+        rightPane.cursor = 0
+        updateSortButtons()
+        renderPane(Panel.RIGHT)
     }
 
     private fun shouldOpenTree(intent: Intent?): Boolean {
@@ -784,7 +840,9 @@ class MainActivity : Activity() {
             pane.rows.add(FileEntry(dir.parentFile, "/..", true, true))
         }
         val files = dir.listFiles()?.toList().orEmpty()
-        val sorted = files.sortedWith(compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase(Locale.US) })
+        val sorted = if (pane === rightPane) sortedFiles(files) else files.sortedWith(
+            compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase(Locale.US) }
+        )
         val visible = if (pane === leftPane) {
             val places = placeEntries()
             val placePaths = places.mapNotNull { it.file?.absolutePath }.toHashSet()
@@ -875,13 +933,35 @@ class MainActivity : Activity() {
         rightVirtualTitle = category.label.uppercase(Locale.US)
         rightPane.directory = homeDirectory()
         rightPane.rows.clear()
-        rightPane.rows.addAll(rows)
+        rightPane.rows.addAll(sortedEntries(rows))
         rightPane.cursor = 0
         rightPane.summary = summarizeRows(rows, includeSize = false)
         activePanel = Panel.RIGHT
         renderPane(Panel.LEFT)
         renderPane(Panel.RIGHT)
         addressPathView?.text = rightVirtualTitle
+    }
+
+    private fun sortedEntries(rows: List<FileEntry>): List<FileEntry> {
+        val fixed = rows.filter { it.file == null || it.isParent }
+        val sortable = rows.filterNot { it.file == null || it.isParent }
+        val files = sortedFiles(sortable.mapNotNull { it.file })
+        val byPath = sortable.mapNotNull { entry -> entry.file?.absolutePath?.let { it to entry } }.toMap()
+        return fixed + files.mapNotNull { byPath[it.absolutePath] }
+    }
+
+    private fun sortedFiles(files: List<File>): List<File> {
+        return files.sortedWith { a, b ->
+            val directoryOrder = compareValues(!a.isDirectory, !b.isDirectory)
+            if (directoryOrder != 0) directoryOrder else when (rightSortMode) {
+                SortMode.NAME_ASC -> a.name.compareTo(b.name, ignoreCase = true)
+                SortMode.NAME_DESC -> b.name.compareTo(a.name, ignoreCase = true)
+                SortMode.MODIFIED_NEWEST -> compareValues(b.lastModified(), a.lastModified()).takeIf { it != 0 }
+                    ?: a.name.compareTo(b.name, ignoreCase = true)
+                SortMode.MODIFIED_OLDEST -> compareValues(a.lastModified(), b.lastModified()).takeIf { it != 0 }
+                    ?: a.name.compareTo(b.name, ignoreCase = true)
+            }
+        }
     }
 
     private fun mediaStoreCount(category: FileCategory): Int {
