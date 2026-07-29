@@ -69,7 +69,8 @@ class MainActivity : Activity() {
         val isDirectory: Boolean,
         val isParent: Boolean = false,
         val isSection: Boolean = false,
-        val contentUri: Uri? = null
+        val contentUri: Uri? = null,
+        val isTrashPlace: Boolean = false
     )
 
     private data class FileCategory(
@@ -329,11 +330,16 @@ class MainActivity : Activity() {
         count.setTextColor(moduleTextColor)
         row.addView(count, LinearLayout.LayoutParams(0, -1, 1f))
         if (selectedPaths.isNotEmpty()) {
-            addSelectionAction(row, "COPY") { prepareCopy() }
-            addSelectionAction(row, "MOVE") { prepareMove() }
-            addSelectionAction(row, "TRASH") { confirmBulkTrash() }
-            addSelectionAction(row, "SHARE") { shareSelectedFiles() }
-            addSelectionAction(row, "ZIP") { promptZipSelected() }
+            val selected = selectedFiles()
+            if (selected.isNotEmpty() && selected.all(::isInTrash)) {
+                addSelectionAction(row, "RESTORE") { confirmRestoreSelected() }
+            } else {
+                addSelectionAction(row, "COPY") { prepareCopy() }
+                addSelectionAction(row, "MOVE") { prepareMove() }
+                addSelectionAction(row, "TRASH") { confirmBulkTrash() }
+                addSelectionAction(row, "SHARE") { shareSelectedFiles() }
+                addSelectionAction(row, "ZIP") { promptZipSelected() }
+            }
         } else if (pendingMovePaths.isNotEmpty()) {
             addSelectionAction(row, "MOVE HERE") { confirmMoveHere() }
         } else {
@@ -883,6 +889,7 @@ class MainActivity : Activity() {
                 null
             }
         }.toMutableList()
+        entries.add(FileEntry(null, "Trash", true, isTrashPlace = true))
         for (path in customPlacePaths()) {
             val file = File(path)
             if (file.exists() && file.isDirectory && seen.add(file.absolutePath)) {
@@ -1059,20 +1066,33 @@ class MainActivity : Activity() {
     }
 
     private fun showRecentlyDeleted() {
-        val dirs = trashDirs().filter { (it.listFiles()?.isNotEmpty() == true) }
-        if (dirs.isEmpty()) {
-            showOutput("RECENTLY DELETED", "Trash is empty")
-        } else if (dirs.size == 1) {
-            showTree(dirs.first())
-        } else {
-            showActionMenu(
-                "Recently deleted",
-                dirs.map { dir ->
-                    val parent = dir.parentFile?.name ?: dir.absolutePath
-                    parent to { showTree(dir) }
-                }
-            )
+        showTrashContents()
+    }
+
+    private fun showTrashContents() {
+        categoryLoadVersion++
+        if (currentScreen != Screen.TREE || leftRowsView == null || rightGridView == null) {
+            currentScreen = Screen.TREE
+            contentHost?.removeAllViews()
+            contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
+            leftPane.directory = homeDirectory()
+            leftPane.cursor = 0
+            reloadPane(leftPane)
         }
+        val items = trashDirs().flatMap { it.listFiles()?.toList().orEmpty() }
+            .distinctBy(File::getAbsolutePath)
+            .map { FileEntry(it, it.name, it.isDirectory) }
+        rightVirtualTitle = "TRASH"
+        activeCategory = null
+        rightPane.directory = homeDirectory()
+        rightPane.rows.clear()
+        rightPane.rows.addAll(sortedEntries(if (items.isEmpty()) listOf(FileEntry(null, "Trash is empty", false)) else items))
+        rightPane.cursor = 0
+        rightPane.summary = summarizeRows(items)
+        activePanel = Panel.RIGHT
+        renderPane(Panel.LEFT)
+        renderPane(Panel.RIGHT)
+        addressPathView?.text = rightVirtualTitle
     }
 
     private fun renderAll() {
@@ -1291,6 +1311,7 @@ class MainActivity : Activity() {
     private fun openSelected() {
         val entry = activePane().rows.getOrNull(activePane().cursor) ?: return
         if (entry.isSection) return
+        if (entry.isTrashPlace) return showTrashContents()
         val file = entry.file ?: return
         if (activePanel == Panel.LEFT) {
             if (entry.isParent) navigateMain(file) else if (entry.isDirectory) showDirectoryContents(file)
@@ -1494,6 +1515,24 @@ class MainActivity : Activity() {
     }
 
     private fun selectedFiles(): List<File> = selectedPaths.map(::File).filter(File::exists)
+
+    private fun confirmRestoreSelected() {
+        val files = selectedFiles().filter(::isInTrash)
+        if (files.isEmpty()) return clearSelection()
+        val panel = dialogPanel("Restore ${files.size} items to their source folders?")
+        lateinit var dialog: AlertDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
+        addDialogButton(buttons, "RESTORE") {
+            dialog.dismiss()
+            val restored = files.count(::restoreFileFromTrash)
+            clearSelection()
+            showTrashContents()
+            showOutput("RESTORE", "$restored of ${files.size} items restored")
+        }
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
+        dialog = showDialogPanel(panel)
+    }
 
     private fun clearSelection() {
         showRightCursorHighlight = false
@@ -2179,10 +2218,15 @@ class MainActivity : Activity() {
     }
 
     private fun restoreFromTrash(file: File) {
-        val targetDir = file.parentFile?.parentFile ?: return
-        val restored = file.renameTo(uniqueFile(File(targetDir, file.name)))
-        reloadAll()
+        val restored = restoreFileFromTrash(file)
+        if (rightVirtualTitle == "TRASH") showTrashContents() else reloadAll()
         showOutput("RESTORE", if (restored) "Restored ${file.name}" else "Could not restore ${file.name}")
+    }
+
+    private fun restoreFileFromTrash(file: File): Boolean {
+        var targetDir = file.parentFile ?: return false
+        while (targetDir.name == TRASH_DIR_NAME) targetDir = targetDir.parentFile ?: return false
+        return file.renameTo(uniqueFile(File(targetDir, file.name)))
     }
 
     private fun uniqueFile(base: File): File {
@@ -2431,6 +2475,7 @@ class MainActivity : Activity() {
 
     private fun showPlacesMenu() {
         val items = placeEntries().mapNotNull { entry ->
+            if (entry.isTrashPlace) return@mapNotNull entry.label to { showTrashContents() }
             val file = entry.file ?: return@mapNotNull null
             entry.label to { showDirectoryContents(file) }
         }
@@ -2604,6 +2649,7 @@ class MainActivity : Activity() {
 
     private fun fileGlyph(entry: FileEntry, selected: Boolean): String {
         if (entry.isParent) return "↑"
+        if (entry.isTrashPlace) return ""
         if (entry.isDirectory) return directoryGlyph(entry.file?.name ?: entry.label, selected)
         val ext = entry.file?.name?.lowercase(Locale.US)?.substringAfterLast('.', "") ?: ""
         return when (ext) {
