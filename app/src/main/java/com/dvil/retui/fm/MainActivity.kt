@@ -333,6 +333,7 @@ class MainActivity : Activity() {
             val selected = selectedFiles()
             if (selected.isNotEmpty() && selected.all(::isInTrash)) {
                 addSelectionAction(row, "RESTORE") { confirmRestoreSelected() }
+                addSelectionAction(row, "DELETE") { confirmDeleteSelectedPermanently() }
             } else {
                 addSelectionAction(row, "COPY") { prepareCopy() }
                 addSelectionAction(row, "MOVE") { prepareMove() }
@@ -1792,6 +1793,7 @@ class MainActivity : Activity() {
     }
 
     private fun confirmDelete(file: File) {
+        if (isInTrash(file)) return confirmDeletePermanently(file)
         val panel = dialogPanel("Delete ${file.name}?")
         val path = label(file.absolutePath, max(10, outputTextSizeSp - 2), false)
         path.gravity = Gravity.CENTER_VERTICAL or Gravity.START
@@ -1813,6 +1815,53 @@ class MainActivity : Activity() {
         buttonParams.topMargin = dp(10)
         panel.addView(buttons, buttonParams)
         dialog = showDialogPanel(panel)
+    }
+
+    private fun confirmDeletePermanently(file: File) {
+        val panel = dialogPanel("Delete ${file.name} permanently?")
+        val warning = label("This cannot be undone.\n${file.absolutePath}", max(10, outputTextSizeSp - 2), false)
+        warning.setSingleLine(false)
+        warning.setTextColor(outputTextColor)
+        warning.setPadding(dp(8), dp(8), dp(8), dp(8))
+        panel.addView(warning, LinearLayout.LayoutParams(-1, -2))
+        lateinit var dialog: AlertDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
+        addDialogButton(buttons, "DELETE") {
+            dialog.dismiss()
+            val deleted = deletePermanently(file)
+            if (rightVirtualTitle == "TRASH") showTrashContents() else reloadAll()
+            showOutput("DELETE", if (deleted) "Permanently deleted ${file.name}" else "Could not delete ${file.name}")
+        }
+        val buttonParams = LinearLayout.LayoutParams(-1, dp(44))
+        buttonParams.topMargin = dp(10)
+        panel.addView(buttons, buttonParams)
+        dialog = showDialogPanel(panel)
+    }
+
+    private fun confirmDeleteSelectedPermanently() {
+        val files = selectedFiles().filter(::isInTrash)
+        if (files.isEmpty()) return clearSelection()
+        val panel = dialogPanel("Delete ${files.size} items permanently?")
+        val warning = label("This cannot be undone.", max(10, outputTextSizeSp - 2), false)
+        warning.gravity = Gravity.CENTER
+        panel.addView(warning, LinearLayout.LayoutParams(-1, dp(44)))
+        lateinit var dialog: AlertDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
+        addDialogButton(buttons, "DELETE") {
+            dialog.dismiss()
+            val deleted = files.count(::deletePermanently)
+            clearSelection()
+            showTrashContents()
+            showOutput("DELETE", "$deleted of ${files.size} items permanently deleted")
+        }
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
+        dialog = showDialogPanel(panel)
+    }
+
+    private fun deletePermanently(file: File): Boolean {
+        return if (file.isDirectory) file.deleteRecursively() else file.delete()
     }
 
     private fun showItemMenu(file: File) {
@@ -1843,6 +1892,8 @@ class MainActivity : Activity() {
         if (isInTrash(file)) {
             labels.add("Restore")
             actions.add { restoreFromTrash(file) }
+            labels.add("Delete permanently")
+            actions.add { confirmDeletePermanently(file) }
         } else if (!file.name.startsWith("..")) {
             labels.add("Move to trash")
             actions.add { confirmDelete(file) }
