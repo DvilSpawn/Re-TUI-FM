@@ -109,6 +109,7 @@ class MainActivity : Activity() {
     private var selectionBar: LinearLayout? = null
     private val selectedPaths = LinkedHashSet<String>()
     private val pendingCopyPaths = ArrayList<String>()
+    private var pendingApkPath: String? = null
     private val pendingMovePaths = ArrayList<String>()
     private var showRightCursorHighlight = true
     private var currentScreen = Screen.HOME
@@ -208,6 +209,14 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        pendingApkPath?.let { path ->
+            pendingApkPath = null
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
+                openFile(File(path))
+                return
+            }
+            showOutput("INSTALL", "Allow Re:T-UI Files to install unknown apps, then open the APK again.")
+        }
         if (firstResume) {
             firstResume = false
         } else if (::leftPane.isInitialized) {
@@ -1320,6 +1329,14 @@ class MainActivity : Activity() {
 
     private fun openFile(file: File, contentUri: Uri? = null) {
         val mime = mimeFor(file)
+        if (mime == "application/vnd.android.package-archive" &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !packageManager.canRequestPackageInstalls()
+        ) {
+            pendingApkPath = file.absolutePath
+            startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            return
+        }
         if (isMediaMime(mime)) {
             val mediaUri = contentUri ?: mediaStoreUriFor(file, mime)
             if (mediaUri != null) {
