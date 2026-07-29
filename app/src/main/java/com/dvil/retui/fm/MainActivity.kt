@@ -192,6 +192,7 @@ class MainActivity : Activity() {
         setContentView(buildUi())
         rootView?.requestFocus()
         ensureStorageAccess()
+        runTrashCleanup()
         if (shouldOpenTree(intent)) showTree(start) else showHome()
         handleIncomingRequest(intent)
     }
@@ -2104,8 +2105,12 @@ class MainActivity : Activity() {
         val parent = file.parentFile ?: return false
         val trash = File(parent, TRASH_DIR_NAME)
         if (!trash.exists() && !trash.mkdirs()) return false
-        val moved = file.renameTo(uniqueFile(File(trash, file.name)))
-        if (moved) rememberTrashDir(trash)
+        val target = uniqueFile(File(trash, file.name))
+        val moved = file.renameTo(target)
+        if (moved) {
+            target.setLastModified(System.currentTimeMillis())
+            rememberTrashDir(trash)
+        }
         return moved
     }
 
@@ -2131,6 +2136,46 @@ class MainActivity : Activity() {
             parent = parent.parentFile
         }
         return false
+    }
+
+    private fun runTrashCleanup(force: Boolean = false, report: Boolean = false) {
+        val prefs = themePrefs()
+        val now = System.currentTimeMillis()
+        Thread {
+            if (!prefs.getBoolean(PREF_TRASH_RETENTION_INITIALIZED, false)) {
+                trashDirs().forEach { root ->
+                    root.walkTopDown().filter(File::isFile).forEach { it.setLastModified(now) }
+                }
+                prefs.edit()
+                    .putBoolean(PREF_TRASH_RETENTION_INITIALIZED, true)
+                    .putLong(PREF_LAST_TRASH_CLEANUP, now)
+                    .apply()
+                if (report) runOnUiThread { showOutput("TRASH CLEANUP", "Existing Trash items will age from today.") }
+                return@Thread
+            }
+
+            val days = prefs.getInt(PREF_TRASH_RETENTION_DAYS, DEFAULT_TRASH_RETENTION_DAYS)
+            if (days <= 0) return@Thread
+            val lastCleanup = prefs.getLong(PREF_LAST_TRASH_CLEANUP, 0L)
+            if (!force && now - lastCleanup < DAY_MILLIS) return@Thread
+
+            val cutoff = now - days * DAY_MILLIS
+            var deleted = 0
+            trashDirs().forEach { root ->
+                root.walkBottomUp().forEach { entry ->
+                    when {
+                        entry == root -> Unit
+                        entry.isFile && entry.lastModified() <= cutoff -> if (entry.delete()) deleted++
+                        entry.isDirectory && entry.listFiles()?.isEmpty() == true -> entry.delete()
+                    }
+                }
+            }
+            prefs.edit().putLong(PREF_LAST_TRASH_CLEANUP, now).apply()
+            if (report) runOnUiThread {
+                reloadAll()
+                showOutput("TRASH CLEANUP", "$deleted expired item${if (deleted == 1) "" else "s"} deleted.")
+            }
+        }.start()
     }
 
     private fun restoreFromTrash(file: File) {
@@ -2319,8 +2364,32 @@ class MainActivity : Activity() {
                 "Open selected with Android" to { withSelected("OPEN") { openFile(it) } },
                 "Share selected file" to { withSelected("SHARE") { shareFile(it) } },
                 "Refresh" to { reloadAll() },
+                "Settings" to { showSettingsMenu() },
                 "Close FM" to { finish() }
             )
+        )
+    }
+
+    private fun showSettingsMenu() {
+        val days = themePrefs().getInt(PREF_TRASH_RETENTION_DAYS, DEFAULT_TRASH_RETENTION_DAYS)
+        val value = if (days <= 0) "Never" else "$days days"
+        showActionMenu("Settings", listOf("Trash cleanup: $value" to { showTrashRetentionMenu() }))
+    }
+
+    private fun showTrashRetentionMenu() {
+        val options = listOf(7 to "7 days", 30 to "30 days", 90 to "90 days", 0 to "Never")
+        showActionMenu(
+            "Trash cleanup",
+            options.map { (days, label) ->
+                label to {
+                    themePrefs().edit()
+                        .putInt(PREF_TRASH_RETENTION_DAYS, days)
+                        .putLong(PREF_LAST_TRASH_CLEANUP, 0L)
+                        .apply()
+                    if (days > 0) runTrashCleanup(force = true, report = true)
+                    else showOutput("TRASH CLEANUP", "Automatic cleanup disabled.")
+                }
+            }
         )
     }
 
@@ -3357,6 +3426,11 @@ class MainActivity : Activity() {
         private const val PREFS_NAME = "retui_fm"
         private const val PREF_CUSTOM_PLACES = "custom_places"
         private const val PREF_TRASH_DIRS = "trash_dirs"
+        private const val PREF_TRASH_RETENTION_DAYS = "trash_retention_days"
+        private const val PREF_TRASH_RETENTION_INITIALIZED = "trash_retention_initialized"
+        private const val PREF_LAST_TRASH_CLEANUP = "last_trash_cleanup"
+        private const val DEFAULT_TRASH_RETENTION_DAYS = 30
+        private const val DAY_MILLIS = 24L * 60L * 60L * 1000L
         private const val MAX_ROWS = 5000
         private const val PREVIEW_MAX_BYTES = 64 * 1024
         private const val RIGHT_GRID_MIN_CELL_WIDTH_DP = 72
