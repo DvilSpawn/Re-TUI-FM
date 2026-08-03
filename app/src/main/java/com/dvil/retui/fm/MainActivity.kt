@@ -185,10 +185,16 @@ open class MainActivity : Activity() {
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        floatingWindow = this is FloatingFilesActivity
+        val redirectStaleLauncherEntry = this is FloatingFilesActivity && intent.action != ACTION_OPEN_CONSOLE
+        floatingWindow = this is FloatingFilesActivity && !redirectStaleLauncherEntry
         setTheme(if (floatingWindow) R.style.AppTheme_Floating else R.style.AppTheme)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         super.onCreate(savedInstanceState)
+        if (redirectStaleLauncherEntry) {
+            startActivity(Intent(intent).setClass(this, MainActivity::class.java))
+            finish()
+            return
+        }
         configureWindow()
         applyThemeExtras(intent)
         val start = resolveStartDirectory(intent)
@@ -3546,6 +3552,7 @@ open class MainActivity : Activity() {
         const val EXTRA_CRT_FILTER = "crt_filter"
         const val ACTION_SEARCH = "search"
         const val ACTION_OPEN = "open"
+        private const val ACTION_OPEN_CONSOLE = "com.dvil.retui.fm.OPEN_CONSOLE"
         private const val PREFS_NAME = "retui_fm"
         private const val PREF_CUSTOM_PLACES = "custom_places"
         private const val PREF_TRASH_DIRS = "trash_dirs"
