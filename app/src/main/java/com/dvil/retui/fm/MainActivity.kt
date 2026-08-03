@@ -5,7 +5,6 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.ClipData
-import android.content.ComponentName
 import android.content.ContentUris
 import android.content.Intent
 import android.content.SharedPreferences
@@ -186,7 +185,7 @@ open class MainActivity : Activity() {
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        floatingWindow = themePrefs().getBoolean(PREF_OPEN_AS_FLOATING_WINDOW, false)
+        floatingWindow = this is FloatingFilesActivity
         setTheme(if (floatingWindow) R.style.AppTheme_Floating else R.style.AppTheme)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         super.onCreate(savedInstanceState)
@@ -267,7 +266,11 @@ open class MainActivity : Activity() {
     private fun configureWindow() {
         if (floatingWindow) {
             window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            window.attributes = window.attributes.apply { gravity = Gravity.CENTER }
+            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            window.attributes = window.attributes.apply {
+                gravity = Gravity.CENTER
+                dimAmount = 0.14f
+            }
             return
         }
         window.setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN)
@@ -298,8 +301,7 @@ open class MainActivity : Activity() {
         root.isFocusableInTouchMode = true
         root.clipChildren = false
         root.clipToPadding = false
-        root.setBackgroundColor(Color.TRANSPARENT)
-        applyWallpaperBackground(root)
+        if (floatingWindow) root.setBackgroundColor(outputPanelColor) else applyWallpaperBackground(root)
         applyCrtForeground(root)
         installWindowInsetsHandler(root)
 
@@ -2492,34 +2494,7 @@ open class MainActivity : Activity() {
     private fun showSettingsMenu() {
         val days = themePrefs().getInt(PREF_TRASH_RETENTION_DAYS, DEFAULT_TRASH_RETENTION_DAYS)
         val value = if (days <= 0) "Never" else "$days days"
-        val windowMode = if (themePrefs().getBoolean(PREF_OPEN_AS_FLOATING_WINDOW, false)) "On" else "Off"
-        showActionMenu(
-            "Settings",
-            listOf(
-                "Trash cleanup: $value" to { showTrashRetentionMenu() },
-                "Open Files as floating window: $windowMode" to { toggleFloatingWindow() }
-            )
-        )
-    }
-
-    private fun toggleFloatingWindow() {
-        val prefs = themePrefs()
-        val enabled = !prefs.getBoolean(PREF_OPEN_AS_FLOATING_WINDOW, false)
-        prefs.edit().putBoolean(PREF_OPEN_AS_FLOATING_WINDOW, enabled).commit()
-        val normal = ComponentName(this, MainActivity::class.java)
-        val floating = ComponentName(this, FloatingFilesActivity::class.java)
-        packageManager.setComponentEnabledSetting(
-            if (enabled) floating else normal,
-            PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-            PackageManager.DONT_KILL_APP
-        )
-        packageManager.setComponentEnabledSetting(
-            if (enabled) normal else floating,
-            PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-            PackageManager.DONT_KILL_APP
-        )
-        Toast.makeText(this, "Window mode applies the next time Files opens", Toast.LENGTH_SHORT).show()
-        finish()
+        showActionMenu("Settings", listOf("Trash cleanup: $value" to { showTrashRetentionMenu() }))
     }
 
     private fun showTrashRetentionMenu() {
@@ -3577,7 +3552,6 @@ open class MainActivity : Activity() {
         private const val PREF_TRASH_RETENTION_DAYS = "trash_retention_days"
         private const val PREF_TRASH_RETENTION_INITIALIZED = "trash_retention_initialized"
         private const val PREF_LAST_TRASH_CLEANUP = "last_trash_cleanup"
-        private const val PREF_OPEN_AS_FLOATING_WINDOW = "open_as_floating_window"
         private const val DEFAULT_TRASH_RETENTION_DAYS = 30
         private const val DAY_MILLIS = 24L * 60L * 60L * 1000L
         private const val MAX_ROWS = 5000

@@ -30,7 +30,6 @@
         <activity
             android:name=".MainActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize"
-            android:enabled="true"
             android:exported="true"
             android:theme="@style/AppTheme"
             android:windowSoftInputMode="adjustResize">
@@ -38,22 +37,13 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <intent-filter>
-                <action android:name="com.dvil.retui.fm.OPEN_CONSOLE" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
         </activity>
         <activity
             android:name=".FloatingFilesActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize"
-            android:enabled="false"
             android:exported="true"
             android:theme="@style/AppTheme.Floating"
             android:windowSoftInputMode="adjustResize">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
             <intent-filter>
                 <action android:name="com.dvil.retui.fm.OPEN_CONSOLE" />
                 <category android:name="android.intent.category.DEFAULT" />
