@@ -5,9 +5,11 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.ClipData
+import android.content.ComponentName
 import android.content.ContentUris
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.res.Configuration
 import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Color
@@ -58,7 +60,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-class MainActivity : Activity() {
+open class MainActivity : Activity() {
     private enum class Panel { LEFT, RIGHT }
     private enum class Screen { HOME, TREE }
     private enum class SortMode { NAME_ASC, NAME_DESC, MODIFIED_NEWEST, MODIFIED_OLDEST }
@@ -170,6 +172,7 @@ class MainActivity : Activity() {
     private var appTypeface: Typeface? = Typeface.MONOSPACE
     private var iconTypeface: Typeface? = null
     private var firstResume = true
+    private var floatingWindow = false
 
     private val topTabOverlapDp = 11
     private val filesUri = MediaStore.Files.getContentUri("external")
@@ -183,6 +186,8 @@ class MainActivity : Activity() {
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        floatingWindow = themePrefs().getBoolean(PREF_OPEN_AS_FLOATING_WINDOW, false)
+        setTheme(if (floatingWindow) R.style.AppTheme_Floating else R.style.AppTheme)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         super.onCreate(savedInstanceState)
         configureWindow()
@@ -191,6 +196,7 @@ class MainActivity : Activity() {
         leftPane = PaneState(start)
         rightPane = PaneState(start)
         setContentView(buildUi())
+        if (floatingWindow) rootView?.post(::applyFloatingWindowBounds)
         rootView?.requestFocus()
         ensureStorageAccess()
         runTrashCleanup()
@@ -230,6 +236,11 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (floatingWindow) rootView?.post(::applyFloatingWindowBounds)
+    }
+
     override fun onBackPressed() {
         if (selectedPaths.isNotEmpty()) {
             clearSelection()
@@ -254,6 +265,11 @@ class MainActivity : Activity() {
     }
 
     private fun configureWindow() {
+        if (floatingWindow) {
+            window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            window.attributes = window.attributes.apply { gravity = Gravity.CENTER }
+            return
+        }
         window.setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN)
         window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
         window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
@@ -266,6 +282,14 @@ class MainActivity : Activity() {
         }
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.BLACK
+    }
+
+    private fun applyFloatingWindowBounds() {
+        val metrics = resources.displayMetrics
+        val width = min((metrics.widthPixels * 0.92f).roundToInt(), dp(720)).coerceAtLeast(1)
+        val height = min((metrics.heightPixels * 0.82f).roundToInt(), dp(760)).coerceAtLeast(1)
+        window.setLayout(width, height)
+        window.attributes = window.attributes.apply { gravity = Gravity.CENTER }
     }
 
     private fun buildUi(): View {
@@ -2468,7 +2492,34 @@ class MainActivity : Activity() {
     private fun showSettingsMenu() {
         val days = themePrefs().getInt(PREF_TRASH_RETENTION_DAYS, DEFAULT_TRASH_RETENTION_DAYS)
         val value = if (days <= 0) "Never" else "$days days"
-        showActionMenu("Settings", listOf("Trash cleanup: $value" to { showTrashRetentionMenu() }))
+        val windowMode = if (themePrefs().getBoolean(PREF_OPEN_AS_FLOATING_WINDOW, false)) "On" else "Off"
+        showActionMenu(
+            "Settings",
+            listOf(
+                "Trash cleanup: $value" to { showTrashRetentionMenu() },
+                "Open Files as floating window: $windowMode" to { toggleFloatingWindow() }
+            )
+        )
+    }
+
+    private fun toggleFloatingWindow() {
+        val prefs = themePrefs()
+        val enabled = !prefs.getBoolean(PREF_OPEN_AS_FLOATING_WINDOW, false)
+        prefs.edit().putBoolean(PREF_OPEN_AS_FLOATING_WINDOW, enabled).commit()
+        val normal = ComponentName(this, MainActivity::class.java)
+        val floating = ComponentName(this, FloatingFilesActivity::class.java)
+        packageManager.setComponentEnabledSetting(
+            if (enabled) floating else normal,
+            PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+            PackageManager.DONT_KILL_APP
+        )
+        packageManager.setComponentEnabledSetting(
+            if (enabled) normal else floating,
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+            PackageManager.DONT_KILL_APP
+        )
+        Toast.makeText(this, "Window mode applies the next time Files opens", Toast.LENGTH_SHORT).show()
+        finish()
     }
 
     private fun showTrashRetentionMenu() {
@@ -3526,6 +3577,7 @@ class MainActivity : Activity() {
         private const val PREF_TRASH_RETENTION_DAYS = "trash_retention_days"
         private const val PREF_TRASH_RETENTION_INITIALIZED = "trash_retention_initialized"
         private const val PREF_LAST_TRASH_CLEANUP = "last_trash_cleanup"
+        private const val PREF_OPEN_AS_FLOATING_WINDOW = "open_as_floating_window"
         private const val DEFAULT_TRASH_RETENTION_DAYS = 30
         private const val DAY_MILLIS = 24L * 60L * 60L * 1000L
         private const val MAX_ROWS = 5000
