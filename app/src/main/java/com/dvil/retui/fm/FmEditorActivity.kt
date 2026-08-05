@@ -56,6 +56,7 @@ class FmEditorActivity : Activity() {
     private var headerCornerRadiusDp = 0
     private var cyberdeckMode = false
     private var crtFilter = false
+    private var crtVignette = true
     private var headerTextSizeSp = 14
     private var outputTextSizeSp = 13
     private var terminalBackgroundImage: String? = null
@@ -198,7 +199,7 @@ class FmEditorActivity : Activity() {
 
     private fun applyCrtForeground(screen: FrameLayout) {
         screen.foreground = if (crtFilter) {
-            CrtOverlayDrawable(this).apply { setAccentColor(outputTextColor) }
+            CrtOverlayDrawable(this, crtVignette).apply { setAccentColor(outputTextColor) }
         } else {
             null
         }
@@ -387,6 +388,7 @@ class FmEditorActivity : Activity() {
         headerCornerRadiusDp = intExtra(MainActivity.EXTRA_HEADER_CORNER_RADIUS, headerCornerRadiusDp)
         cyberdeckMode = booleanExtra(MainActivity.EXTRA_CYBERDECK_MODE, cyberdeckMode)
         crtFilter = booleanExtra(MainActivity.EXTRA_CRT_FILTER, booleanExtra("enable_crt_filter", crtFilter))
+        crtVignette = booleanExtra(MainActivity.EXTRA_CRT_VIGNETTE, crtVignette)
         terminalBackgroundImage = intent?.getStringExtra(MainActivity.EXTRA_TERMINAL_BG_IMAGE)
         appTypeface = resolveTypeface()
     }

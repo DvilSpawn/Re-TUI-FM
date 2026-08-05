@@ -166,6 +166,7 @@ open class MainActivity : Activity() {
     private var terminalBackgroundImage: String? = null
     private var cyberdeckMode = false
     private var crtFilter = false
+    private var crtVignette = true
     private var appFontPath: String? = null
     private var appFontName: String? = null
     private var appTypeface: Typeface? = Typeface.MONOSPACE
@@ -2888,7 +2889,7 @@ open class MainActivity : Activity() {
 
     private fun applyCrtForeground(root: FrameLayout) {
         root.foreground = if (crtFilter) {
-            CrtOverlayDrawable(this).apply { setAccentColor(outputTextColor) }
+            CrtOverlayDrawable(this, crtVignette).apply { setAccentColor(outputTextColor) }
         } else {
             null
         }
@@ -2898,6 +2899,11 @@ open class MainActivity : Activity() {
         val prefs = themePrefs()
         val shouldUseLauncherFontFallback = shouldUseLauncherFontFallback(intent)
         applyStoredTheme(prefs)
+        crtVignette = CrtAppearance.resolveVignette(
+            booleanExtraOrNull(intent, EXTRA_CRT_VIGNETTE),
+            booleanExtraOrNull(intent, EXTRA_CRT_VIGNETTE_ALIAS),
+            localCrtVignette()
+        )
         applyThemePayload(intent)
         if (shouldUseLauncherFontFallback && applyLauncherFontFallback()) {
             prefs.edit()
@@ -2944,6 +2950,7 @@ open class MainActivity : Activity() {
         intent.putExtra(EXTRA_TERMINAL_BG_IMAGE, terminalBackgroundImage)
         intent.putExtra(EXTRA_CYBERDECK_MODE, cyberdeckMode)
         intent.putExtra(EXTRA_CRT_FILTER, crtFilter)
+        intent.putExtra(EXTRA_CRT_VIGNETTE, crtVignette)
         appFontPath?.let { intent.putExtra(EXTRA_FONT_PATH, it) }
         appFontName?.let { intent.putExtra(EXTRA_FONT_NAME, it) }
     }
@@ -2971,6 +2978,15 @@ open class MainActivity : Activity() {
             }
         }
         return fallback
+    }
+
+    private fun booleanExtraOrNull(intent: Intent?, key: String): Boolean? {
+        val value = intent?.extras?.get(key) ?: return null
+        return when (value) {
+            is Boolean -> value
+            is Number -> value.toInt() != 0
+            else -> value.toString().equals("true", true) || value.toString() == "1"
+        }
     }
 
     private fun applyStoredTheme(prefs: SharedPreferences) {
@@ -3275,6 +3291,19 @@ open class MainActivity : Activity() {
         )
     }
 
+    private fun localCrtVignette(): Boolean? {
+        val config = launcherUiFiles().firstOrNull { it.exists() && it.isFile } ?: return null
+        val xml = try {
+            config.readText()
+        } catch (_: Exception) {
+            return null
+        }
+        val value = xmlValue(xml, EXTRA_CRT_VIGNETTE)
+            ?: xmlValue(xml, EXTRA_CRT_VIGNETTE_ALIAS)
+            ?: return null
+        return value.equals("true", true) || value == "1"
+    }
+
     private fun xmlValue(xml: String, name: String): String? {
         return Regex("<$name\\s+value=\"([^\"]*)\"").find(xml)?.groupValues?.getOrNull(1)
     }
@@ -3550,6 +3579,8 @@ open class MainActivity : Activity() {
         const val EXTRA_TERMINAL_BG_IMAGE = "terminal_bg_image"
         const val EXTRA_CYBERDECK_MODE = "cyberdeck_mode"
         const val EXTRA_CRT_FILTER = "crt_filter"
+        const val EXTRA_CRT_VIGNETTE = "enable_crt_vignette"
+        private const val EXTRA_CRT_VIGNETTE_ALIAS = "crt_vignette"
         const val ACTION_SEARCH = "search"
         const val ACTION_OPEN = "open"
         private const val ACTION_OPEN_CONSOLE = "com.dvil.retui.fm.OPEN_CONSOLE"

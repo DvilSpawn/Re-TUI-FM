@@ -12,7 +12,8 @@ import android.graphics.Shader
 import android.graphics.drawable.Drawable
 import kotlin.math.max
 
-class CrtOverlayDrawable(context: Context) : Drawable() {
+class CrtOverlayDrawable(context: Context, vignetteEnabled: Boolean = true) : Drawable() {
+    private val layers = CrtAppearance.layers(crtEnabled = true, vignetteEnabled)
     private val density = context.resources.displayMetrics.density
     private val tintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
@@ -64,22 +65,22 @@ class CrtOverlayDrawable(context: Context) : Drawable() {
         val b = bounds
         if (b.isEmpty) return
 
-        canvas.drawRect(b, tintPaint)
+        if (layers.tint) canvas.drawRect(b, tintPaint)
 
         var y = b.top.toFloat()
         while (y < b.bottom) {
-            canvas.drawRect(b.left.toFloat(), y, b.right.toFloat(), y + scanlineHeightPx, scanlinePaint)
-            canvas.drawRect(b.left.toFloat(), y + scanlineHeightPx, b.right.toFloat(), y + scanlineHeightPx + beamHeightPx, beamPaint)
+            if (layers.scanlines) canvas.drawRect(b.left.toFloat(), y, b.right.toFloat(), y + scanlineHeightPx, scanlinePaint)
+            if (layers.beams) canvas.drawRect(b.left.toFloat(), y + scanlineHeightPx, b.right.toFloat(), y + scanlineHeightPx + beamHeightPx, beamPaint)
             y += scanlineStepPx
         }
 
         var x = b.left.toFloat()
         while (x < b.right) {
-            canvas.drawLine(x, b.top.toFloat(), x, b.bottom.toFloat(), maskPaint)
+            if (layers.maskLines) canvas.drawLine(x, b.top.toFloat(), x, b.bottom.toFloat(), maskPaint)
             x += maskStepPx
         }
 
-        canvas.drawRect(b, vignettePaint)
+        if (layers.vignette) canvas.drawRect(b, vignettePaint)
     }
 
     override fun setAlpha(alpha: Int) {
