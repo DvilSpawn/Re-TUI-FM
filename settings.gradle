@@ -14,3 +14,5 @@ dependencyResolutionManagement {
 }
 rootProject.name = "Re-T-UI-FM"
 include ':app'
+include ':retui-contract'
+project(':retui-contract').projectDir = new File(settingsDir, 'retui-contract')

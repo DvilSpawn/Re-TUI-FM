@@ -65,6 +65,7 @@ kotlin {
 }
 
 dependencies {
+    implementation project(':retui-contract')
     implementation 'androidx.core:core:1.13.1'
     testImplementation 'junit:junit:4.13.2'
 }

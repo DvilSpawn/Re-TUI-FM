@@ -27,6 +27,12 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <provider
+            android:name=".LauncherMetadataProvider"
+            android:authorities="com.dvil.retui.fm.launcher"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+
         <activity
             android:name=".MainActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize"

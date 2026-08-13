@@ -1,22 +1,14 @@
 package com.dvil.retui.fm
 
-import android.content.Intent
-import android.graphics.Color
 import android.os.Build
 import android.view.WindowInsets
 import kotlin.math.max
 
 object FmVisualInterop {
     @JvmStatic
-    fun readColorExtra(intent: Intent?, fallback: Int, vararg keys: String?): Int {
-        val extras = intent?.extras ?: return fallback
-        for (key in keys) {
-            if (key.isNullOrEmpty() || !extras.containsKey(key)) continue
-            @Suppress("DEPRECATION")
-            val value = extras.get(key)
-            parseColorValue(value)?.let { return it }
-        }
-        return fallback
+    fun scaleColorAlpha(color: Int, maximumAlpha: Int): Int {
+        val scaledAlpha = (color ushr 24) * maximumAlpha.coerceIn(0, 255) / 255
+        return (color and 0x00ffffff) or (scaledAlpha shl 24)
     }
 
     @JvmStatic
@@ -39,25 +31,5 @@ object FmVisualInterop {
             }
         }
         return intArrayOf(left, top, right, bottom)
-    }
-
-    private fun parseColorValue(value: Any?): Int? {
-        if (value == null) return null
-        if (value is Number) return value.toInt()
-        val raw = value.toString().trim()
-        if (raw.isEmpty()) return null
-        return try {
-            when {
-                raw.startsWith("#") -> Color.parseColor(raw)
-                raw.startsWith("0x", ignoreCase = true) -> {
-                    var parsed = raw.substring(2).toLong(16)
-                    if (raw.length <= 8) parsed = parsed or 0xff000000L
-                    parsed.toInt()
-                }
-                else -> raw.toInt()
-            }
-        } catch (_: Exception) {
-            null
-        }
     }
 }

@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.Bundle
 import android.text.TextUtils
 import android.view.Gravity
+import com.dvil.retui.contract.RetuiVisualContract
 import android.view.View
 import android.view.Window
 import android.view.WindowManager
@@ -59,12 +60,15 @@ class FmEditorActivity : Activity() {
     private var crtVignette = true
     private var headerTextSizeSp = 14
     private var outputTextSizeSp = 13
+    private var fontScaleOffsetSp = 0
     private var terminalBackgroundImage: String? = null
     private var appTypeface: Typeface? = Typeface.MONOSPACE
+    private var launcherFrameRuntime: FilesFrameRuntime? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         super.onCreate(savedInstanceState)
+        launcherFrameRuntime = FilesFrameRuntime.load(this)
         applyThemeExtras()
         configureWindow()
 
@@ -142,7 +146,7 @@ class FmEditorActivity : Activity() {
         editor!!.setSelection(editor!!.text.length)
         editor!!.setTextColor(outputTextColor)
         editor!!.setHintTextColor(withAlpha(outputTextColor, 150))
-        editor!!.setTextSize(outputTextSizeSp.toFloat())
+        editor!!.setTextSize(scaledFontSp(outputTextSizeSp, fontScaleOffsetSp))
         editor!!.typeface = appTypeface
         editor!!.setPadding(dp(12), dp(10), dp(12), dp(10))
         editor!!.background = panelDrawable(PanelRole.OUTPUT, true)
@@ -249,7 +253,7 @@ class FmEditorActivity : Activity() {
         val view = TextView(this)
         view.text = text
         view.setTextColor(outputTextColor)
-        view.setTextSize(sizeSp.toFloat())
+        view.setTextSize(scaledFontSp(sizeSp, fontScaleOffsetSp))
         view.typeface = appTypeface ?: Typeface.MONOSPACE
         if (bold) view.setTypeface(view.typeface, Typeface.BOLD)
         view.includeFontPadding = true
@@ -312,17 +316,21 @@ class FmEditorActivity : Activity() {
             PanelRole.OUTPUT -> outputBorderColor
             PanelRole.MODULE -> outputBorderColor
         }
-        if (cyberdeckMode) {
-            return CyberPanelDrawable(fill, stroke, max(1f, dpFloat(if (role == PanelRole.MODULE) 1.5f else 1.2f)), true)
+        val fallback = if (cyberdeckMode) {
+            CyberPanelDrawable(fill, stroke, max(1f, dpFloat(if (role == PanelRole.MODULE) 1.5f else 1.2f)), true)
+        } else {
+            roundedDrawable(fill, stroke, roleRadius(role))
         }
-        return roundedDrawable(fill, stroke, roleRadius(role))
+        return launcherFrameRuntime?.drawable(fallback) ?: fallback
     }
 
     private fun buttonDrawable(fill: Int, stroke: Int): Drawable {
-        if (cyberdeckMode) {
-            return CyberPanelDrawable(fill, stroke, max(1f, dpFloat(1f)), false)
+        val fallback = if (cyberdeckMode) {
+            CyberPanelDrawable(fill, stroke, max(1f, dpFloat(1f)), false)
+        } else {
+            roundedDrawable(fill, stroke, moduleCornerRadiusDp)
         }
-        return roundedDrawable(fill, stroke, moduleCornerRadiusDp)
+        return launcherFrameRuntime?.drawable(fallback, interactive = true) ?: fallback
     }
 
     private fun roundedDrawable(fill: Int, stroke: Int, radiusDp: Int): GradientDrawable {
@@ -369,39 +377,40 @@ class FmEditorActivity : Activity() {
 
     private fun applyThemeExtras() {
         val intent = intent
-        bgColor = FmVisualInterop.readColorExtra(intent, bgColor, MainActivity.EXTRA_THEME_BG)
-        panelColor = FmVisualInterop.readColorExtra(intent, panelColor, MainActivity.EXTRA_TERMINAL_BG)
-        textColor = FmVisualInterop.readColorExtra(intent, textColor, MainActivity.EXTRA_THEME_TEXT)
-        borderColor = FmVisualInterop.readColorExtra(intent, borderColor, MainActivity.EXTRA_THEME_BORDER)
-        headerPanelColor = FmVisualInterop.readColorExtra(intent, panelColor, MainActivity.EXTRA_MODULE_HEADER_BG_COLOR)
-        headerTextColor = FmVisualInterop.readColorExtra(intent, textColor, MainActivity.EXTRA_MODULE_HEADER_TEXT_COLOR)
-        buttonBgColor = FmVisualInterop.readColorExtra(intent, buttonBgColor, MainActivity.EXTRA_MODULE_BUTTON_BG_COLOR)
-        buttonTextColor = FmVisualInterop.readColorExtra(intent, textColor, MainActivity.EXTRA_MODULE_BUTTON_TEXT_COLOR)
-        buttonBorderColor = FmVisualInterop.readColorExtra(intent, borderColor, MainActivity.EXTRA_MODULE_BUTTON_BORDER_COLOR)
-        outputPanelColor = FmVisualInterop.readColorExtra(intent, panelColor, MainActivity.EXTRA_OUTPUT_BG_COLOR)
-        outputTextColor = FmVisualInterop.readColorExtra(intent, textColor, MainActivity.EXTRA_OUTPUT_TEXT_COLOR)
-        outputBorderColor = FmVisualInterop.readColorExtra(intent, borderColor, MainActivity.EXTRA_OUTPUT_BORDER_COLOR)
-        headerTextSizeSp = intExtra(MainActivity.EXTRA_HEADER_TEXT_SIZE, headerTextSizeSp)
-        outputTextSizeSp = intExtra(MainActivity.EXTRA_OUTPUT_TEXT_SIZE, outputTextSizeSp)
-        moduleCornerRadiusDp = intExtra(MainActivity.EXTRA_MODULE_CORNER_RADIUS, moduleCornerRadiusDp)
-        outputCornerRadiusDp = intExtra(MainActivity.EXTRA_OUTPUT_CORNER_RADIUS, outputCornerRadiusDp)
-        headerCornerRadiusDp = intExtra(MainActivity.EXTRA_HEADER_CORNER_RADIUS, headerCornerRadiusDp)
-        cyberdeckMode = booleanExtra(MainActivity.EXTRA_CYBERDECK_MODE, cyberdeckMode)
-        crtFilter = booleanExtra(MainActivity.EXTRA_CRT_FILTER, booleanExtra("enable_crt_filter", crtFilter))
-        crtVignette = booleanExtra(MainActivity.EXTRA_CRT_VIGNETTE, crtVignette)
-        terminalBackgroundImage = intent?.getStringExtra(MainActivity.EXTRA_TERMINAL_BG_IMAGE)
+        bgColor = RetuiVisualContract.color(intent, bgColor, RetuiVisualContract.BG)
+        panelColor = RetuiVisualContract.color(intent, panelColor, RetuiVisualContract.TERMINAL_BG)
+        textColor = RetuiVisualContract.color(intent, textColor, RetuiVisualContract.TEXT)
+        borderColor = RetuiVisualContract.color(intent, borderColor, RetuiVisualContract.BORDER)
+        headerPanelColor = RetuiVisualContract.color(intent, panelColor, RetuiVisualContract.HEADER_BG)
+        headerTextColor = RetuiVisualContract.color(intent, textColor, RetuiVisualContract.HEADER_TEXT)
+        buttonBgColor = RetuiVisualContract.color(intent, buttonBgColor, RetuiVisualContract.BUTTON_BG)
+        buttonTextColor = RetuiVisualContract.color(intent, textColor, RetuiVisualContract.BUTTON_TEXT)
+        buttonBorderColor = RetuiVisualContract.color(intent, borderColor, RetuiVisualContract.BUTTON_BORDER)
+        outputPanelColor = RetuiVisualContract.color(intent, panelColor, RetuiVisualContract.OUTPUT_BG)
+        outputTextColor = RetuiVisualContract.color(intent, textColor, RetuiVisualContract.OUTPUT_TEXT)
+        outputBorderColor = RetuiVisualContract.color(intent, borderColor, RetuiVisualContract.OUTPUT_BORDER)
+        headerTextSizeSp = RetuiVisualContract.int(intent, headerTextSizeSp, RetuiVisualContract.HEADER_TEXT_SIZE)
+        outputTextSizeSp = RetuiVisualContract.int(intent, outputTextSizeSp, RetuiVisualContract.BODY_TEXT_SIZE)
+        fontScaleOffsetSp = intent?.getIntExtra(MainActivity.EXTRA_FONT_SCALE_OFFSET, 0)?.coerceIn(-3, 4) ?: 0
+        moduleCornerRadiusDp = RetuiVisualContract.int(intent, moduleCornerRadiusDp, RetuiVisualContract.MODULE_CORNER_RADIUS)
+        outputCornerRadiusDp = RetuiVisualContract.int(intent, outputCornerRadiusDp, RetuiVisualContract.OUTPUT_CORNER_RADIUS)
+        headerCornerRadiusDp = RetuiVisualContract.int(intent, headerCornerRadiusDp, RetuiVisualContract.HEADER_CORNER_RADIUS)
+        cyberdeckMode = RetuiVisualContract.boolean(intent, cyberdeckMode, RetuiVisualContract.CYBERDECK_MODE)
+        crtFilter = RetuiVisualContract.boolean(intent, crtFilter, RetuiVisualContract.CRT_FILTER)
+        crtVignette = RetuiVisualContract.boolean(intent, crtVignette, RetuiVisualContract.CRT_VIGNETTE)
+        terminalBackgroundImage = RetuiVisualContract.string(intent, RetuiVisualContract.TERMINAL_BG_IMAGE)
         appTypeface = resolveTypeface()
     }
 
     private fun resolveTypeface(): Typeface? {
-        val path = intent?.getStringExtra(MainActivity.EXTRA_FONT_PATH)
+        val path = RetuiVisualContract.string(intent, RetuiVisualContract.FONT_PATH)
         if (!TextUtils.isEmpty(path)) {
             try {
                 return Typeface.createFromFile(path)
             } catch (_: Exception) {
             }
         }
-        val name = intent?.getStringExtra(MainActivity.EXTRA_FONT_NAME)
+        val name = RetuiVisualContract.string(intent, RetuiVisualContract.FONT_NAME)
         if (!TextUtils.isEmpty(name)) {
             if (name.equals("system", true)) return Typeface.DEFAULT
             if (name.equals("lucida_console", true)) {
@@ -413,20 +422,6 @@ class FmEditorActivity : Activity() {
             return Typeface.create(name, Typeface.NORMAL)
         }
         return Typeface.MONOSPACE
-    }
-
-    private fun intExtra(key: String, fallback: Int): Int {
-        val value = intent?.extras?.get(key) ?: return fallback
-        return if (value is Number) value.toInt() else fallback
-    }
-
-    private fun booleanExtra(key: String, fallback: Boolean): Boolean {
-        val value = intent?.extras?.get(key) ?: return fallback
-        return when (value) {
-            is Boolean -> value
-            is Number -> value.toInt() != 0
-            else -> value.toString().equals("true", ignoreCase = true) || value.toString() == "1"
-        }
     }
 
     private fun withAlpha(color: Int, alpha: Int): Int {

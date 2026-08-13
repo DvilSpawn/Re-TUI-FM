@@ -1,6 +1,7 @@
 package com.dvil.retui.fm
 
 import android.Manifest
+import com.dvil.retui.contract.RetuiVisualContract
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ActivityNotFoundException
@@ -28,10 +29,12 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.Window
 import android.view.WindowManager
@@ -116,6 +119,7 @@ open class MainActivity : Activity() {
     private val pendingCopyPaths = ArrayList<String>()
     private var pendingApkPath: String? = null
     private val pendingMovePaths = ArrayList<String>()
+    private var shareSelectionMode = false
     private var showRightCursorHighlight = true
     private var rightSortMode = SortMode.NAME_ASC
     private var currentScreen = Screen.HOME
@@ -151,6 +155,7 @@ open class MainActivity : Activity() {
     private var headerTextSizeSp = 14
     private var outputTextSizeSp = 13
     private var inputFontSizeSp = 13
+    private var fontScaleOffsetSp = 0
     private var moduleCornerRadiusDp = 0
     private var outputCornerRadiusDp = 0
     private var headerCornerRadiusDp = 0
@@ -173,6 +178,7 @@ open class MainActivity : Activity() {
     private var iconTypeface: Typeface? = null
     private var firstResume = true
     private var floatingWindow = false
+    private var launcherFrameRuntime: FilesFrameRuntime? = null
 
     private val topTabOverlapDp = 11
     private val filesUri = MediaStore.Files.getContentUri("external")
@@ -186,18 +192,15 @@ open class MainActivity : Activity() {
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        val redirectStaleLauncherEntry = this is FloatingFilesActivity && intent.action != ACTION_OPEN_CONSOLE
-        floatingWindow = this is FloatingFilesActivity && !redirectStaleLauncherEntry
+        floatingWindow = this is FloatingFilesActivity
         setTheme(if (floatingWindow) R.style.AppTheme_Floating else R.style.AppTheme)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         super.onCreate(savedInstanceState)
-        if (redirectStaleLauncherEntry) {
-            startActivity(Intent(intent).setClass(this, MainActivity::class.java))
-            finish()
-            return
-        }
+        LauncherFrameStore(this).process(intent)
+        launcherFrameRuntime = FilesFrameRuntime.load(this)
         configureWindow()
         applyThemeExtras(intent)
+        configureIncomingMode(intent)
         val start = resolveStartDirectory(intent)
         leftPane = PaneState(start)
         rightPane = PaneState(start)
@@ -213,10 +216,14 @@ open class MainActivity : Activity() {
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         setIntent(intent)
+        LauncherFrameStore(this).process(intent)
+        launcherFrameRuntime = FilesFrameRuntime.load(this)
         selectedPaths.clear()
         pendingCopyPaths.clear()
         pendingMovePaths.clear()
+        shareSelectionMode = false
         applyThemeExtras(intent)
+        configureIncomingMode(intent)
         val start = resolveStartDirectory(intent)
         leftPane = PaneState(start)
         rightPane = PaneState(start)
@@ -229,7 +236,7 @@ open class MainActivity : Activity() {
         super.onResume()
         pendingApkPath?.let { path ->
             pendingApkPath = null
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
+            if (packageManager.canRequestPackageInstalls()) {
                 openFile(File(path))
                 return
             }
@@ -242,14 +249,21 @@ open class MainActivity : Activity() {
         }
     }
 
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == FONT_IMPORT_REQUEST && resultCode == RESULT_OK) {
+            data?.data?.let(::importSelectedFont)
+        }
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         if (floatingWindow) rootView?.post(::applyFloatingWindowBounds)
     }
 
     override fun onBackPressed() {
-        if (selectedPaths.isNotEmpty()) {
-            clearSelection()
+        if (selectedPaths.isNotEmpty() || shareSelectionMode) {
+            closeShareSelection()
             return
         }
         if (currentScreen == Screen.HOME) {
@@ -272,14 +286,21 @@ open class MainActivity : Activity() {
 
     private fun configureWindow() {
         if (floatingWindow) {
+            val dimAmount = 0.42f
+            val barDim = Color.argb((255 * dimAmount).roundToInt(), 0, 0, 0)
             window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+            window.setDimAmount(dimAmount)
+            window.statusBarColor = barDim
+            window.navigationBarColor = barDim
             window.attributes = window.attributes.apply {
                 gravity = Gravity.CENTER
-                dimAmount = 0.14f
+                this.dimAmount = dimAmount
             }
             return
         }
+        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         window.setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN)
         window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
         window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
@@ -298,8 +319,13 @@ open class MainActivity : Activity() {
         val metrics = resources.displayMetrics
         val width = min((metrics.widthPixels * 0.92f).roundToInt(), dp(720)).coerceAtLeast(1)
         val height = min((metrics.heightPixels * 0.82f).roundToInt(), dp(760)).coerceAtLeast(1)
-        window.setLayout(width, height)
-        window.attributes = window.attributes.apply { gravity = Gravity.CENTER }
+        window.attributes = window.attributes.apply {
+            gravity = Gravity.TOP or Gravity.START
+            this.width = width
+            this.height = height
+            x = ((metrics.widthPixels - width) / 2).coerceAtLeast(0)
+            y = ((metrics.heightPixels - height) / 2).coerceAtLeast(0)
+        }
     }
 
     private fun buildUi(): View {
@@ -308,7 +334,7 @@ open class MainActivity : Activity() {
         root.isFocusableInTouchMode = true
         root.clipChildren = false
         root.clipToPadding = false
-        if (floatingWindow) root.setBackgroundColor(outputPanelColor) else applyWallpaperBackground(root)
+        if (floatingWindow) root.setBackgroundColor(Color.TRANSPARENT) else applyWallpaperBackground(root)
         applyCrtForeground(root)
         installWindowInsetsHandler(root)
 
@@ -342,7 +368,7 @@ open class MainActivity : Activity() {
         row.gravity = Gravity.CENTER_VERTICAL
         row.setPadding(dp(6), dp(3), dp(6), dp(3))
         row.background = toolbarDrawable()
-        row.visibility = if (selectedPaths.isEmpty() && pendingCopyPaths.isEmpty() && pendingMovePaths.isEmpty()) View.INVISIBLE else View.VISIBLE
+        row.visibility = if (shareSelectionMode || selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty() || pendingMovePaths.isNotEmpty()) View.VISIBLE else View.GONE
         updateSelectionBar()
         return row
     }
@@ -350,10 +376,11 @@ open class MainActivity : Activity() {
     private fun updateSelectionBar() {
         val row = selectionBar ?: return
         row.removeAllViews()
-        val hasWork = selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty() || pendingMovePaths.isNotEmpty()
-        row.visibility = if (hasWork && currentScreen == Screen.TREE) View.VISIBLE else View.INVISIBLE
+        val hasWork = shareSelectionMode || selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty() || pendingMovePaths.isNotEmpty()
+        row.visibility = if (hasWork && currentScreen == Screen.TREE) View.VISIBLE else View.GONE
         if (!hasWork) return
         val countText = when {
+            shareSelectionMode && selectedPaths.isEmpty() -> "Select files to share"
             selectedPaths.isNotEmpty() -> "${selectedPaths.size} selected"
             pendingMovePaths.isNotEmpty() -> "${pendingMovePaths.size} ready to move"
             else -> "${pendingCopyPaths.size} ready to copy"
@@ -362,6 +389,11 @@ open class MainActivity : Activity() {
         count.gravity = Gravity.CENTER_VERTICAL
         count.setTextColor(moduleTextColor)
         row.addView(count, LinearLayout.LayoutParams(0, -1, 1f))
+        if (shareSelectionMode) {
+            if (selectedPaths.isNotEmpty()) addSelectionAction(row, "SHARE") { shareSelectedFiles() }
+            addSelectionAction(row, "X") { closeShareSelection() }
+            return
+        }
         if (selectedPaths.isNotEmpty()) {
             val selected = selectedFiles()
             if (selected.isNotEmpty() && selected.all(::isInTrash)) {
@@ -440,6 +472,8 @@ open class MainActivity : Activity() {
         row.clipChildren = false
         row.clipToPadding = false
         row.setPadding(dp(28), 0, dp(18), 0)
+        row.contentDescription = "Drag floating Files window"
+        installFloatingWindowDrag(row)
 
         val title = label("RETUI FM", 16, true)
         title.gravity = Gravity.CENTER
@@ -450,6 +484,36 @@ open class MainActivity : Activity() {
         row.addView(title, LinearLayout.LayoutParams(dp(124), dp(28)))
 
         return row
+    }
+
+    private fun installFloatingWindowDrag(handle: View) {
+        if (!floatingWindow) return
+        var downRawX = 0f
+        var downRawY = 0f
+        var startX = 0
+        var startY = 0
+        handle.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downRawX = event.rawX
+                    downRawY = event.rawY
+                    startX = window.attributes.x
+                    startY = window.attributes.y
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val metrics = resources.displayMetrics
+                    val attrs = window.attributes
+                    val actualWidth = window.decorView.width.takeIf { it > 0 } ?: attrs.width
+                    val actualHeight = window.decorView.height.takeIf { it > 0 } ?: attrs.height
+                    attrs.gravity = Gravity.TOP or Gravity.START
+                    attrs.x = clampFloatingWindowPosition(startX, event.rawX - downRawX, metrics.widthPixels, actualWidth)
+                    attrs.y = clampFloatingWindowPosition(startY, event.rawY - downRawY, metrics.heightPixels, actualHeight)
+                    windowManager.updateViewLayout(window.decorView, attrs)
+                }
+                MotionEvent.ACTION_UP -> handle.performClick()
+            }
+            true
+        }
     }
 
     private fun buildMenuBar(): View {
@@ -534,7 +598,7 @@ open class MainActivity : Activity() {
                 rightPane.cursor = position
                 clampCursor(rightPane)
                 val entry = rightPane.rows.getOrNull(position)
-                if (selectedPaths.isNotEmpty()) {
+                if (shareSelectionMode || selectedPaths.isNotEmpty()) {
                     entry?.file?.let(::toggleSelection)
                 } else {
                     showRightCursorHighlight = true
@@ -622,7 +686,6 @@ open class MainActivity : Activity() {
 
     private fun shouldOpenTree(intent: Intent?): Boolean {
         return !intent?.getStringExtra(EXTRA_ACTION).isNullOrBlank() ||
-            !intent?.getStringExtra(EXTRA_COMMAND).isNullOrBlank() ||
             !intent?.getStringExtra(EXTRA_PATH).isNullOrBlank() ||
             searchRequestExtra(intent) != null
     }
@@ -809,46 +872,31 @@ open class MainActivity : Activity() {
         }
     }
 
-    private fun runCommand(command: String) {
-        val parts = splitCommand(command)
-        if (parts.isEmpty()) return
-        when (parts[0].lowercase(Locale.US)) {
-            "help" -> showHelpPopup()
-            "refresh", "ls" -> reloadAll()
-            "pwd" -> showOutput("PWD", contentPane().directory.absolutePath)
-            "cd" -> changeDirectory(if (parts.size > 1) resolvePath(parts[1]) else homeDirectory())
-            "preview", "peek", "view" -> resolveArg(parts, 1)?.let { previewFile(it) } ?: showOutput("PREVIEW", "preview: usage: preview [file]")
-            "edit" -> resolveArg(parts, 1)?.let { editFile(it) } ?: showOutput("EDIT", "edit: usage: edit [text file]")
-            "open" -> resolveArg(parts, 1)?.let { openFile(it) } ?: selectedFile()?.let { openFile(it) }
-            "share" -> resolveArg(parts, 1)?.let { shareFile(it) } ?: selectedFile()?.let { shareFile(it) }
-            "mkdir" -> runMkdir(parts)
-            "rm", "delete" -> runDelete(parts)
-            "cp" -> runCopy(parts)
-            "mv", "renmov" -> runMove(parts)
-            "find", "search" -> runFind(searchRequestFromParts(parts.drop(1)))
-            "exit", "quit", "close" -> finish()
-            else -> showOutput("ERROR", "Command not found: $command")
+    private fun handleIncomingRequest(intent: Intent?) {
+        val action = intent?.getStringExtra(EXTRA_ACTION)?.trim()?.lowercase(Locale.US)
+        when (action) {
+            ACTION_OPEN -> incomingTarget(intent)?.let {
+                if (it.isDirectory) navigateMain(it) else if (it.exists()) openFile(it) else showOutput("OPEN", "Not found: ${it.path}")
+            }
+            ACTION_LIST -> Unit
+            ACTION_SHARE -> intent?.getStringExtra(EXTRA_TARGET)?.takeIf { it.isNotBlank() }?.let {
+                val target = incomingTarget(intent)
+                if (target != null && target.exists()) shareFile(target) else showOutput("SHARE", "Not found: $it")
+            }
+            ACTION_SEARCH -> searchRequestExtra(intent)?.let(::runFind)
+            else -> searchRequestExtra(intent)?.let(::runFind)
         }
     }
 
-    private fun handleIncomingRequest(intent: Intent?) {
-        val action = intent?.getStringExtra(EXTRA_ACTION)?.trim()?.lowercase(Locale.US)
-        if (action == ACTION_SEARCH) {
-            searchRequestExtra(intent)?.let(::runFind)
-            return
-        }
-        if (action == ACTION_OPEN) return
-        val search = searchRequestExtra(intent)
-        if (search != null) {
-            runFind(search)
-            return
-        }
-        // Temporary compatibility for Launcher versions that still send a raw command.
-        val command = intent?.getStringExtra(EXTRA_COMMAND)?.trim()
-        if (!command.isNullOrEmpty()) {
-            runCommand(command)
-        }
+    private fun configureIncomingMode(intent: Intent?) {
+        shareSelectionMode = intent?.getStringExtra(EXTRA_ACTION)?.equals(ACTION_SHARE, true) == true &&
+            intent.getStringExtra(EXTRA_TARGET).isNullOrBlank()
     }
+
+    private fun incomingTarget(intent: Intent?): File? = FilesNavigationContract.launchTarget(
+        intent?.getStringExtra(EXTRA_PATH),
+        intent?.getStringExtra(EXTRA_TARGET)
+    )
 
     private fun searchExtra(intent: Intent?): String? {
         return stringExtra(intent, EXTRA_SEARCH, "query", "q", "search_query")
@@ -1215,12 +1263,12 @@ open class MainActivity : Activity() {
         val holder = cell.tag as GridCellHolder
         holder.icon.text = fileGlyph(entry, selected)
         holder.icon.setTextColor(iconColor)
-        holder.icon.setTextSize(max(28, outputTextSizeSp + 13).toFloat())
+        holder.icon.setTextSize(scaledFontSp(max(28, outputTextSizeSp + 13), fontScaleOffsetSp))
         holder.icon.typeface = nerdTypeface()
         holder.label.text = if (entry.isParent) ".." else entry.label
         holder.label.isSelected = selected
         holder.label.setTextColor(color)
-        holder.label.setTextSize(max(9, outputTextSizeSp - 3).toFloat())
+        holder.label.setTextSize(scaledFontSp(max(9, outputTextSizeSp - 3), fontScaleOffsetSp))
         holder.label.setTypeface(appTypeface ?: Typeface.MONOSPACE, if (entry.isDirectory) Typeface.BOLD else Typeface.NORMAL)
     }
 
@@ -1236,7 +1284,7 @@ open class MainActivity : Activity() {
             activePanel = panel
             pane(panel).cursor = index
             clampCursor(pane(panel))
-            if (panel == Panel.RIGHT && selectedPaths.isNotEmpty()) entry.file?.let(::toggleSelection) else openSelected()
+            if (panel == Panel.RIGHT && (shareSelectionMode || selectedPaths.isNotEmpty())) entry.file?.let(::toggleSelection) else openSelected()
         }
         row.setOnLongClickListener {
             activePanel = panel
@@ -1472,10 +1520,7 @@ open class MainActivity : Activity() {
 
     private fun openFile(file: File, contentUri: Uri? = null) {
         val mime = mimeFor(file)
-        if (mime == "application/vnd.android.package-archive" &&
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            !packageManager.canRequestPackageInstalls()
-        ) {
+        if (mime == "application/vnd.android.package-archive" && !packageManager.canRequestPackageInstalls()) {
             pendingApkPath = file.absolutePath
             startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
             return
@@ -1528,6 +1573,7 @@ open class MainActivity : Activity() {
 
     private fun toggleSelection(file: File) {
         if (!file.exists() || file.name == TRASH_DIR_NAME) return
+        if (shareSelectionMode && !file.isFile) return
         showRightCursorHighlight = false
         if (selectedPaths.isEmpty()) {
             pendingCopyPaths.clear()
@@ -1575,6 +1621,11 @@ open class MainActivity : Activity() {
         pendingMovePaths.clear()
         updateSelectionBar()
         refreshSelectionHighlights()
+    }
+
+    private fun closeShareSelection() {
+        shareSelectionMode = false
+        clearSelection()
     }
 
     private fun prepareCopy() {
@@ -1720,6 +1771,7 @@ open class MainActivity : Activity() {
         intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         startActivity(Intent.createChooser(intent, "Share ${uris.size} files"))
+        if (shareSelectionMode) closeShareSelection()
     }
 
     private fun promptZipSelected() {
@@ -1732,7 +1784,7 @@ open class MainActivity : Activity() {
         input.setText("archive.zip")
         input.selectAll()
         input.setTextColor(inputTextColor)
-        input.setTextSize(inputFontSizeSp.toFloat())
+        input.setTextSize(scaledFontSp(inputFontSizeSp, fontScaleOffsetSp))
         input.background = addressDrawable()
         input.setPadding(dp(8), 0, dp(8), 0)
         panel.addView(input, LinearLayout.LayoutParams(-1, dp(44)))
@@ -1795,34 +1847,6 @@ open class MainActivity : Activity() {
         zip.putNextEntry(ZipEntry(cleanName))
         FileInputStream(file).use { it.copyTo(zip) }
         zip.closeEntry()
-    }
-
-    private fun runMkdir(parts: List<String>) {
-        val name = parts.getOrNull(1)
-        if (name.isNullOrBlank()) {
-            showOutput("MKDIR", "mkdir: missing folder name")
-            return
-        }
-        val dir = resolvePath(name)
-        if (dir.exists()) {
-            showOutput("MKDIR", "Already exists: ${dir.absolutePath}")
-            return
-        }
-        if (dir.mkdirs()) {
-            reloadAll()
-            showOutput("MKDIR", "Created ${dir.absolutePath}")
-        } else {
-            showOutput("MKDIR", "Could not create ${dir.absolutePath}")
-        }
-    }
-
-    private fun runDelete(parts: List<String>) {
-        val file = resolveArg(parts, 1) ?: selectedFile()
-        if (file == null || !file.exists()) {
-            showOutput("DELETE", "rm: no target")
-            return
-        }
-        confirmDelete(file)
     }
 
     private fun confirmDelete(file: File) {
@@ -1970,7 +1994,7 @@ open class MainActivity : Activity() {
         input.typeface = appTypeface
         input.setTextColor(inputTextColor)
         input.setHintTextColor(withAlpha(inputTextColor, 145))
-        input.setTextSize(inputFontSizeSp.toFloat())
+        input.setTextSize(scaledFontSp(inputFontSizeSp, fontScaleOffsetSp))
         input.setPadding(dp(8), 0, dp(8), 0)
         input.background = addressDrawable()
         input.hint = "Folder name"
@@ -2015,7 +2039,7 @@ open class MainActivity : Activity() {
         input.typeface = appTypeface
         input.setTextColor(inputTextColor)
         input.setHintTextColor(withAlpha(inputTextColor, 145))
-        input.setTextSize(inputFontSizeSp.toFloat())
+        input.setTextSize(scaledFontSp(inputFontSizeSp, fontScaleOffsetSp))
         input.setPadding(dp(8), 0, dp(8), 0)
         input.background = addressDrawable()
         input.hint = "Name contains..."
@@ -2036,46 +2060,6 @@ open class MainActivity : Activity() {
         buttonParams.topMargin = dp(10)
         panel.addView(buttons, buttonParams)
         dialog = showDialogPanel(panel, input)
-    }
-
-    private fun runCopy(parts: List<String>) {
-        val src = resolveArg(parts, 1)
-        val dst = parts.getOrNull(2)?.let { resolvePath(it) }
-        if (src == null || dst == null) {
-            showOutput("COPY", "cp: usage: cp [source] [destination]")
-            return
-        }
-        try {
-            val target = if (dst.isDirectory) File(dst, src.name) else dst
-            copyRecursively(src, target)
-            reloadAll()
-            showOutput("COPY", "Copied ${src.absolutePath}\n-> ${target.absolutePath}")
-        } catch (e: Exception) {
-            showOutput("COPY", "Copy failed:\n${e.message}")
-        }
-    }
-
-    private fun runMove(parts: List<String>) {
-        val src = resolveArg(parts, 1)
-        val dst = parts.getOrNull(2)?.let { resolvePath(it) }
-        if (src == null || dst == null) {
-            showOutput("MOVE", "mv: usage: mv [source] [destination]")
-            return
-        }
-        val target = if (dst.isDirectory) File(dst, src.name) else dst
-        if (src.renameTo(target)) {
-            reloadAll()
-            showOutput("MOVE", "Moved ${src.absolutePath}\n-> ${target.absolutePath}")
-        } else {
-            try {
-                copyRecursively(src, target)
-                val deleted = if (src.isDirectory) src.deleteRecursively() else src.delete()
-                reloadAll()
-                showOutput("MOVE", if (deleted) "Moved ${src.absolutePath}\n-> ${target.absolutePath}" else "Copied but could not remove source")
-            } catch (e: Exception) {
-                showOutput("MOVE", "Move failed:\n${e.message}")
-            }
-        }
     }
 
     private fun runFind(request: SearchRequest, root: File = contentPane().directory) {
@@ -2359,7 +2343,7 @@ open class MainActivity : Activity() {
         val button = label(text, outputTextSizeSp, true)
         button.gravity = Gravity.CENTER
         button.setTextColor(moduleButtonTextColor)
-        button.background = panelDrawable(PanelRole.MODULE)
+        button.background = panelDrawable(PanelRole.MODULE, interactive = true)
         button.setOnClickListener { action() }
         val params = LinearLayout.LayoutParams(dp(96), dp(38))
         params.leftMargin = dp(8)
@@ -2430,17 +2414,6 @@ open class MainActivity : Activity() {
         return entry.file
     }
 
-    private fun resolveArg(parts: List<String>, index: Int): File? {
-        return parts.getOrNull(index)?.let { resolvePath(it) }
-    }
-
-    private fun resolvePath(path: String): File {
-        val clean = path.trim()
-        val raw = if (clean.startsWith("~")) homeDirectory().absolutePath + clean.drop(1) else clean
-        val file = File(raw)
-        return if (file.isAbsolute) file.absoluteFile else File(contentPane().directory, raw).absoluteFile
-    }
-
     private fun splitCommand(command: String): List<String> {
         val out = ArrayList<String>()
         val current = StringBuilder()
@@ -2472,7 +2445,6 @@ open class MainActivity : Activity() {
     private fun pane(panel: Panel): PaneState = if (panel == Panel.LEFT) leftPane else rightPane
     private fun activePane(): PaneState = pane(activePanel)
     private fun contentPane(): PaneState = rightPane
-    private fun panelFor(pane: PaneState): Panel = if (pane === leftPane) Panel.LEFT else Panel.RIGHT
 
     private fun addMenuButton(parent: LinearLayout, text: String, action: () -> Unit) {
         val view = label(text, outputTextSizeSp, true)
@@ -2501,7 +2473,131 @@ open class MainActivity : Activity() {
     private fun showSettingsMenu() {
         val days = themePrefs().getInt(PREF_TRASH_RETENTION_DAYS, DEFAULT_TRASH_RETENTION_DAYS)
         val value = if (days <= 0) "Never" else "$days days"
-        showActionMenu("Settings", listOf("Trash cleanup: $value" to { showTrashRetentionMenu() }))
+        val acceptFrames = LauncherFrameStore(this).isAccepted()
+        val fontMode = currentFontModeLabel()
+        val scale = fontScaleLabel(fontScaleOffsetSp)
+        showActionMenu(
+            "Settings",
+            listOf(
+                "Trash cleanup: $value" to { showTrashRetentionMenu() },
+                "Accept frames from Launcher: ${if (acceptFrames) "On" else "Off"}" to { toggleLauncherFrames(acceptFrames) },
+                "Font: $fontMode" to { showFontMenu() },
+                "Font scale: $scale" to { showFontScaleMenu() }
+            )
+        )
+    }
+
+    private fun toggleLauncherFrames(current: Boolean) {
+        if (LauncherFrameStore(this).setAccepted(!current)) recreate()
+        else Toast.makeText(this, "Could not save frame setting.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showFontMenu() {
+        showActionMenu(
+            "Font",
+            listOf(
+                "Import custom .ttf or .otf" to { launchFontImportPicker() },
+                "Follow Launcher" to { setFontOverride(null) },
+                "Use system font" to { setFontOverride(FONT_MODE_SYSTEM) },
+                "Use Re:T-UI monospace" to { setFontOverride(FONT_MODE_DEFAULT) }
+            )
+        )
+    }
+
+    private fun showFontScaleMenu() {
+        showActionMenu(
+            "Font scale",
+            FONT_SCALE_CATEGORIES.map { (offset, label) ->
+                label to {
+                    themePrefs().edit().putInt(PREF_FONT_SCALE_OFFSET, offset).apply()
+                    recreate()
+                }
+            }
+        )
+    }
+
+    private fun launchFontImportPicker() {
+        val picker = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, FONT_MIME_TYPES)
+        }
+        try {
+            startActivityForResult(picker, FONT_IMPORT_REQUEST)
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, "Font picker is unavailable on this device.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun importSelectedFont(uri: Uri) {
+        val displayName = try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor ->
+                    if (!cursor.moveToFirst()) null
+                    else cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let(cursor::getString)
+                }
+        } catch (_: Exception) {
+            null
+        }
+            ?: uri.lastPathSegment
+            ?: "retui-font.ttf"
+        val safeName = displayName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        if (!isSupportedFontName(safeName)) {
+            Toast.makeText(this, "Choose a .ttf or .otf font file.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val fontDir = File(filesDir, "fonts")
+        val target = uniqueFontTarget(fontDir, safeName)
+        try {
+            check(fontDir.exists() || fontDir.mkdirs()) { "Unable to create the font folder." }
+            contentResolver.openInputStream(uri).use { input ->
+                checkNotNull(input) { "Unable to read the selected font." }
+                FileOutputStream(target).use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    var total = 0L
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        total += read
+                        check(total <= MAX_FONT_BYTES) { "Font file is too large." }
+                        output.write(buffer, 0, read)
+                    }
+                }
+            }
+            check(target.length() in 1..MAX_FONT_BYTES) { "Font file is empty or too large." }
+            Typeface.createFromFile(target)
+            themePrefs().edit()
+                .putString(PREF_FONT_MODE, FONT_MODE_CUSTOM)
+                .putString(PREF_CUSTOM_FONT_PATH, target.absolutePath)
+                .apply()
+            recreate()
+        } catch (error: Exception) {
+            target.delete()
+            Toast.makeText(this, "Font import failed: ${error.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun uniqueFontTarget(directory: File, name: String): File {
+        val extension = "." + name.substringAfterLast('.', "ttf")
+        val stem = name.removeSuffix(extension)
+        var target = File(directory, name)
+        var suffix = 2
+        while (target.exists()) target = File(directory, "$stem-$suffix${extension.lowercase(Locale.US)}").also { suffix++ }
+        return target
+    }
+
+    private fun setFontOverride(mode: String?) {
+        themePrefs().edit().apply {
+            if (mode == null) remove(PREF_FONT_MODE) else putString(PREF_FONT_MODE, mode)
+        }.apply()
+        recreate()
+    }
+
+    private fun currentFontModeLabel(): String = when (themePrefs().getString(PREF_FONT_MODE, null)) {
+        FONT_MODE_CUSTOM -> File(themePrefs().getString(PREF_CUSTOM_FONT_PATH, "").orEmpty()).name.ifBlank { "Custom" }
+        FONT_MODE_SYSTEM -> "System"
+        FONT_MODE_DEFAULT -> "Re:T-UI monospace"
+        else -> "Follow Launcher"
     }
 
     private fun showTrashRetentionMenu() {
@@ -2614,34 +2710,11 @@ open class MainActivity : Activity() {
         parent.addView(view, params)
     }
 
-    private fun addAction(parent: LinearLayout?, text: String, action: () -> Unit) {
-        if (parent == null) return
-        val view = label(text, max(9, inputFontSizeSp - 4), true)
-        view.gravity = Gravity.CENTER
-        view.setTextColor(moduleButtonTextColor)
-        view.background = functionButtonBackground()
-        view.setOnClickListener { action() }
-        val params = LinearLayout.LayoutParams(0, -1, 1f)
-        params.setMargins(dp(2), dp(1), dp(2), dp(1))
-        parent.addView(view, params)
-    }
-
-    private fun addKey(parent: LinearLayout?, text: String, action: () -> Unit) {
-        if (parent == null) return
-        val view = label(text, max(9, inputFontSizeSp - 4), true)
-        view.gravity = Gravity.CENTER
-        view.setTextColor(moduleButtonTextColor)
-        view.setOnClickListener { action() }
-        val params = LinearLayout.LayoutParams(0, -1, 1f)
-        params.setMargins(dp(2), dp(1), dp(2), dp(1))
-        parent.addView(view, params)
-    }
-
     private fun label(text: String?, sizeSp: Int, bold: Boolean): TextView {
         val view = TextView(this)
         view.text = text ?: ""
         view.setTextColor(outputTextColor)
-        view.setTextSize(sizeSp.toFloat())
+        view.setTextSize(scaledFontSp(sizeSp, fontScaleOffsetSp))
         view.typeface = appTypeface ?: Typeface.MONOSPACE
         if (bold) view.setTypeface(view.typeface, Typeface.BOLD)
         view.includeFontPadding = false
@@ -2654,7 +2727,7 @@ open class MainActivity : Activity() {
         view.gravity = gravity or Gravity.CENTER_VERTICAL
         view.setPadding(dp(2), 0, dp(2), 0)
         view.setTextColor(moduleTextColor)
-        view.background = ColorDrawable(withAlpha(modulePanelColor, 210))
+        view.background = ColorDrawable(FmVisualInterop.scaleColorAlpha(modulePanelColor, 210))
         view.layoutParams = LinearLayout.LayoutParams(0, -1, weight)
         return view
     }
@@ -2664,7 +2737,7 @@ open class MainActivity : Activity() {
         view.gravity = Gravity.CENTER_VERTICAL
         view.setPadding(dp(5), 0, dp(2), 0)
         view.setTextColor(withAlpha(moduleTextColor, 175))
-        view.background = ColorDrawable(withAlpha(moduleButtonBgColor, 80))
+        view.background = ColorDrawable(FmVisualInterop.scaleColorAlpha(moduleButtonBgColor, 80))
         return view
     }
 
@@ -2855,9 +2928,7 @@ open class MainActivity : Activity() {
     }
 
     private fun resolveStartDirectory(intent: Intent?): File {
-        val raw = intent?.getStringExtra(EXTRA_PATH)
-        val target = if (raw.isNullOrBlank()) homeDirectory() else File(raw)
-        return if (target.exists() && target.isDirectory) target.absoluteFile else homeDirectory()
+        return FilesNavigationContract.startDirectory(intent?.getStringExtra(EXTRA_PATH), homeDirectory())
     }
 
     private fun ensureStorageAccess() {
@@ -2900,175 +2971,155 @@ open class MainActivity : Activity() {
         val shouldUseLauncherFontFallback = shouldUseLauncherFontFallback(intent)
         applyStoredTheme(prefs)
         crtVignette = CrtAppearance.resolveVignette(
-            booleanExtraOrNull(intent, EXTRA_CRT_VIGNETTE),
-            booleanExtraOrNull(intent, EXTRA_CRT_VIGNETTE_ALIAS),
+            RetuiVisualContract.booleanOrNull(intent, RetuiVisualContract.CRT_VIGNETTE),
+            null,
             localCrtVignette()
         )
         applyThemePayload(intent)
         if (shouldUseLauncherFontFallback && applyLauncherFontFallback()) {
             prefs.edit()
-                .putString(EXTRA_FONT_PATH, appFontPath)
-                .putString(EXTRA_FONT_NAME, appFontName)
+                .putString(RetuiVisualContract.FONT_PATH, appFontPath)
+                .putString(RetuiVisualContract.FONT_NAME, appFontName)
                 .apply()
         }
-        if (hasThemePayload(intent)) saveThemePayload(prefs, intent)
+        if (RetuiVisualContract.hasVisualPayload(intent)) saveThemePayload(prefs, intent)
+        applyLocalFontOverride(prefs)
         appTypeface = resolveTypeface()
     }
 
     private fun putThemeExtras(intent: Intent) {
-        intent.putExtra(EXTRA_THEME_BG, bgColor)
-        intent.putExtra(EXTRA_TERMINAL_BG, panelColor)
-        intent.putExtra(EXTRA_THEME_TEXT, textColor)
-        intent.putExtra(EXTRA_THEME_BORDER, borderColor)
-        intent.putExtra(EXTRA_MODULE_BG_COLOR, modulePanelColor)
-        intent.putExtra(EXTRA_MODULE_TEXT_COLOR, moduleTextColor)
-        intent.putExtra(EXTRA_MODULE_BORDER_COLOR, moduleBorderColor)
-        intent.putExtra(EXTRA_MODULE_HEADER_BG_COLOR, headerPanelColor)
-        intent.putExtra(EXTRA_MODULE_HEADER_TEXT_COLOR, headerTextColor)
-        intent.putExtra(EXTRA_MODULE_BUTTON_BG_COLOR, moduleButtonBgColor)
-        intent.putExtra(EXTRA_MODULE_BUTTON_TEXT_COLOR, moduleButtonTextColor)
-        intent.putExtra(EXTRA_MODULE_BUTTON_BORDER_COLOR, moduleButtonBorderColor)
-        intent.putExtra(EXTRA_OUTPUT_BG_COLOR, outputPanelColor)
-        intent.putExtra(EXTRA_OUTPUT_TEXT_COLOR, outputTextColor)
-        intent.putExtra(EXTRA_OUTPUT_BORDER_COLOR, outputBorderColor)
-        intent.putExtra(EXTRA_FM_PANEL_BG_COLOR, outputPanelColor)
-        intent.putExtra(EXTRA_FM_BORDER_COLOR, outputBorderColor)
-        intent.putExtra(EXTRA_FM_TEXT_COLOR, fileTextColor)
-        intent.putExtra(EXTRA_FM_DIRECTORY_TEXT_COLOR, directoryTextColor)
-        intent.putExtra(EXTRA_FM_SELECTION_BG_COLOR, selectionBgColor)
-        intent.putExtra(EXTRA_FM_SELECTION_TEXT_COLOR, selectionTextColor)
-        intent.putExtra(EXTRA_FM_HEADER_BG_COLOR, headerPanelColor)
-        intent.putExtra(EXTRA_FM_HEADER_TEXT_COLOR, headerTextColor)
-        intent.putExtra(EXTRA_FM_BUTTON_BG_COLOR, moduleButtonBgColor)
-        intent.putExtra(EXTRA_FM_BUTTON_TEXT_COLOR, moduleButtonTextColor)
-        intent.putExtra(EXTRA_FM_BUTTON_BORDER_COLOR, moduleButtonBorderColor)
-        intent.putExtra(EXTRA_HEADER_TEXT_SIZE, headerTextSizeSp)
-        intent.putExtra(EXTRA_OUTPUT_TEXT_SIZE, outputTextSizeSp)
-        intent.putExtra(EXTRA_MODULE_CORNER_RADIUS, moduleCornerRadiusDp)
-        intent.putExtra(EXTRA_OUTPUT_CORNER_RADIUS, outputCornerRadiusDp)
-        intent.putExtra(EXTRA_HEADER_CORNER_RADIUS, headerCornerRadiusDp)
-        intent.putExtra(EXTRA_TERMINAL_BG_IMAGE, terminalBackgroundImage)
-        intent.putExtra(EXTRA_CYBERDECK_MODE, cyberdeckMode)
-        intent.putExtra(EXTRA_CRT_FILTER, crtFilter)
-        intent.putExtra(EXTRA_CRT_VIGNETTE, crtVignette)
-        appFontPath?.let { intent.putExtra(EXTRA_FONT_PATH, it) }
-        appFontName?.let { intent.putExtra(EXTRA_FONT_NAME, it) }
-    }
-
-    private fun intExtra(intent: Intent?, key: String, fallback: Int, vararg aliases: String): Int {
-        val extras = intent?.extras ?: return fallback
-        val keys = arrayOf(key, *aliases)
-        for (candidate in keys) {
-            val value = extras.get(candidate) ?: continue
-            if (value is Number) return value.toInt()
-            value.toString().toIntOrNull()?.let { return it }
-        }
-        return fallback
-    }
-
-    private fun booleanExtra(intent: Intent?, key: String, fallback: Boolean, vararg aliases: String): Boolean {
-        val extras = intent?.extras ?: return fallback
-        val keys = arrayOf(key, *aliases)
-        for (candidate in keys) {
-            val value = extras.get(candidate) ?: continue
-            return when (value) {
-                is Boolean -> value
-                is Number -> value.toInt() != 0
-                else -> value.toString().equals("true", true) || value.toString() == "1"
-            }
-        }
-        return fallback
-    }
-
-    private fun booleanExtraOrNull(intent: Intent?, key: String): Boolean? {
-        val value = intent?.extras?.get(key) ?: return null
-        return when (value) {
-            is Boolean -> value
-            is Number -> value.toInt() != 0
-            else -> value.toString().equals("true", true) || value.toString() == "1"
-        }
+        intent.putExtra(RetuiVisualContract.BG, bgColor)
+        intent.putExtra(RetuiVisualContract.TERMINAL_BG, panelColor)
+        intent.putExtra(RetuiVisualContract.TEXT, textColor)
+        intent.putExtra(RetuiVisualContract.BORDER, borderColor)
+        intent.putExtra(RetuiVisualContract.PANEL_BG, modulePanelColor)
+        intent.putExtra(RetuiVisualContract.PANEL_TEXT, moduleTextColor)
+        intent.putExtra(RetuiVisualContract.PANEL_BORDER, moduleBorderColor)
+        intent.putExtra(RetuiVisualContract.HEADER_BG, headerPanelColor)
+        intent.putExtra(RetuiVisualContract.HEADER_TEXT, headerTextColor)
+        intent.putExtra(RetuiVisualContract.BUTTON_BG, moduleButtonBgColor)
+        intent.putExtra(RetuiVisualContract.BUTTON_TEXT, moduleButtonTextColor)
+        intent.putExtra(RetuiVisualContract.BUTTON_BORDER, moduleButtonBorderColor)
+        intent.putExtra(RetuiVisualContract.INPUT_BG, inputBgColor)
+        intent.putExtra(RetuiVisualContract.INPUT_TEXT, inputTextColor)
+        intent.putExtra(RetuiVisualContract.OUTPUT_BG, outputPanelColor)
+        intent.putExtra(RetuiVisualContract.OUTPUT_TEXT, outputTextColor)
+        intent.putExtra(RetuiVisualContract.OUTPUT_BORDER, outputBorderColor)
+        intent.putExtra(RetuiVisualContract.DIRECTORY_TEXT, directoryTextColor)
+        intent.putExtra(RetuiVisualContract.SELECTION_BG, selectionBgColor)
+        intent.putExtra(RetuiVisualContract.SELECTION_TEXT, selectionTextColor)
+        // file list text maps to TEXT when not overridden; keep distinct via TEXT already set
+        intent.putExtra(RetuiVisualContract.HEADER_TEXT_SIZE, headerTextSizeSp)
+        intent.putExtra(RetuiVisualContract.BODY_TEXT_SIZE, outputTextSizeSp)
+        intent.putExtra(RetuiVisualContract.INPUT_FONT_SIZE, inputFontSizeSp)
+        intent.putExtra(EXTRA_FONT_SCALE_OFFSET, fontScaleOffsetSp)
+        intent.putExtra(RetuiVisualContract.MODULE_CORNER_RADIUS, moduleCornerRadiusDp)
+        intent.putExtra(RetuiVisualContract.OUTPUT_CORNER_RADIUS, outputCornerRadiusDp)
+        intent.putExtra(RetuiVisualContract.HEADER_CORNER_RADIUS, headerCornerRadiusDp)
+        intent.putExtra(RetuiVisualContract.TOP_MARGIN, topMarginDp)
+        intent.putExtra(RetuiVisualContract.TERMINAL_BG_IMAGE, terminalBackgroundImage)
+        intent.putExtra(RetuiVisualContract.CYBERDECK_MODE, cyberdeckMode)
+        intent.putExtra(RetuiVisualContract.CRT_FILTER, crtFilter)
+        intent.putExtra(RetuiVisualContract.CRT_VIGNETTE, crtVignette)
+        appFontPath?.let { intent.putExtra(RetuiVisualContract.FONT_PATH, it) }
+        appFontName?.let { intent.putExtra(RetuiVisualContract.FONT_NAME, it) }
     }
 
     private fun applyStoredTheme(prefs: SharedPreferences) {
-        bgColor = prefs.getInt(EXTRA_THEME_BG, bgColor)
-        panelColor = prefs.getInt(EXTRA_TERMINAL_BG, panelColor)
-        textColor = prefs.getInt(EXTRA_THEME_TEXT, textColor)
-        borderColor = prefs.getInt(EXTRA_THEME_BORDER, borderColor)
-        modulePanelColor = prefs.getInt(EXTRA_MODULE_BG_COLOR, modulePanelColor)
-        moduleTextColor = prefs.getInt(EXTRA_MODULE_TEXT_COLOR, moduleTextColor)
-        moduleBorderColor = prefs.getInt(EXTRA_MODULE_BORDER_COLOR, moduleBorderColor)
-        headerPanelColor = prefs.getInt(EXTRA_MODULE_HEADER_BG_COLOR, headerPanelColor)
-        headerTextColor = prefs.getInt(EXTRA_MODULE_HEADER_TEXT_COLOR, headerTextColor)
-        moduleButtonBgColor = prefs.getInt(EXTRA_MODULE_BUTTON_BG_COLOR, moduleButtonBgColor)
-        moduleButtonTextColor = prefs.getInt(EXTRA_MODULE_BUTTON_TEXT_COLOR, moduleButtonTextColor)
-        moduleButtonBorderColor = prefs.getInt(EXTRA_MODULE_BUTTON_BORDER_COLOR, moduleButtonBorderColor)
-        inputBgColor = prefs.getInt(EXTRA_INPUT_BG_COLOR, inputBgColor)
-        inputTextColor = prefs.getInt(EXTRA_INPUT_TEXT_COLOR, inputTextColor)
-        outputPanelColor = prefs.getInt(EXTRA_OUTPUT_BG_COLOR, outputPanelColor)
-        outputTextColor = prefs.getInt(EXTRA_OUTPUT_TEXT_COLOR, outputTextColor)
-        outputBorderColor = prefs.getInt(EXTRA_OUTPUT_BORDER_COLOR, outputBorderColor)
-        fileTextColor = prefs.getInt(EXTRA_FM_TEXT_COLOR, fileTextColor)
-        directoryTextColor = prefs.getInt(EXTRA_FM_DIRECTORY_TEXT_COLOR, directoryTextColor)
-        selectionBgColor = prefs.getInt(EXTRA_FM_SELECTION_BG_COLOR, selectionBgColor)
-        selectionTextColor = prefs.getInt(EXTRA_FM_SELECTION_TEXT_COLOR, selectionTextColor)
-        headerTextSizeSp = prefs.getInt(EXTRA_HEADER_TEXT_SIZE, headerTextSizeSp)
-        outputTextSizeSp = prefs.getInt(EXTRA_OUTPUT_TEXT_SIZE, outputTextSizeSp)
-        inputFontSizeSp = prefs.getInt(EXTRA_INPUT_FONT_SIZE, inputFontSizeSp)
-        moduleCornerRadiusDp = prefs.getInt(EXTRA_MODULE_CORNER_RADIUS, moduleCornerRadiusDp)
-        outputCornerRadiusDp = prefs.getInt(EXTRA_OUTPUT_CORNER_RADIUS, outputCornerRadiusDp)
-        headerCornerRadiusDp = prefs.getInt(EXTRA_HEADER_CORNER_RADIUS, headerCornerRadiusDp)
-        topMarginDp = prefs.getInt(EXTRA_TOP_MARGIN, topMarginDp)
-        terminalBackgroundImage = prefs.getString(EXTRA_TERMINAL_BG_IMAGE, terminalBackgroundImage)
-        cyberdeckMode = prefs.getBoolean(EXTRA_CYBERDECK_MODE, cyberdeckMode)
-        crtFilter = prefs.getBoolean(EXTRA_CRT_FILTER, crtFilter)
-        appFontPath = prefs.getString(EXTRA_FONT_PATH, appFontPath)
-        appFontName = prefs.getString(EXTRA_FONT_NAME, appFontName)
-        applyDisplayMarginsString(prefs.getString(EXTRA_DISPLAY_MARGIN_TOP_SECTION, null))
+        bgColor = prefsInt(prefs, RetuiVisualContract.BG, bgColor, "theme_bg")
+        panelColor = prefsInt(prefs, RetuiVisualContract.TERMINAL_BG, panelColor, "terminal_bg")
+        textColor = prefsInt(prefs, RetuiVisualContract.TEXT, textColor, "theme_text")
+        borderColor = prefsInt(prefs, RetuiVisualContract.BORDER, borderColor, "theme_border")
+        modulePanelColor = prefsInt(prefs, RetuiVisualContract.PANEL_BG, modulePanelColor, "module_bg_color")
+        moduleTextColor = prefsInt(prefs, RetuiVisualContract.PANEL_TEXT, moduleTextColor, "module_text_color")
+        moduleBorderColor = prefsInt(prefs, RetuiVisualContract.PANEL_BORDER, moduleBorderColor, "module_border_color")
+        headerPanelColor = prefsInt(prefs, RetuiVisualContract.HEADER_BG, headerPanelColor, "module_header_bg_color", "fm_header_background_color")
+        headerTextColor = prefsInt(prefs, RetuiVisualContract.HEADER_TEXT, headerTextColor, "module_header_text_color", "fm_header_text_color")
+        moduleButtonBgColor = prefsInt(prefs, RetuiVisualContract.BUTTON_BG, moduleButtonBgColor, "module_button_bg_color", "fm_button_background_color")
+        moduleButtonTextColor = prefsInt(prefs, RetuiVisualContract.BUTTON_TEXT, moduleButtonTextColor, "module_button_text_color", "fm_button_text_color")
+        moduleButtonBorderColor = prefsInt(prefs, RetuiVisualContract.BUTTON_BORDER, moduleButtonBorderColor, "module_button_border_color", "fm_button_border_color")
+        inputBgColor = prefsInt(prefs, RetuiVisualContract.INPUT_BG, inputBgColor, "input_bg_color")
+        inputTextColor = prefsInt(prefs, RetuiVisualContract.INPUT_TEXT, inputTextColor, "input_text_color")
+        outputPanelColor = prefsInt(prefs, RetuiVisualContract.OUTPUT_BG, outputPanelColor, "output_bg_color", "fm_panel_background_color")
+        outputTextColor = prefsInt(prefs, RetuiVisualContract.OUTPUT_TEXT, outputTextColor, "output_text_color")
+        outputBorderColor = prefsInt(prefs, RetuiVisualContract.OUTPUT_BORDER, outputBorderColor, "output_border_color", "fm_border_color")
+        fileTextColor = prefsInt(prefs, RetuiVisualContract.TEXT, fileTextColor, "fm_text_color", "theme_text")
+        directoryTextColor = prefsInt(prefs, RetuiVisualContract.DIRECTORY_TEXT, directoryTextColor, "fm_directory_text_color")
+        selectionBgColor = prefsInt(prefs, RetuiVisualContract.SELECTION_BG, selectionBgColor, "fm_selection_background_color")
+        selectionTextColor = prefsInt(prefs, RetuiVisualContract.SELECTION_TEXT, selectionTextColor, "fm_selection_text_color")
+        headerTextSizeSp = prefsInt(prefs, RetuiVisualContract.HEADER_TEXT_SIZE, headerTextSizeSp, "header_text_size", "module_header_text_size")
+        outputTextSizeSp = prefsInt(prefs, RetuiVisualContract.BODY_TEXT_SIZE, outputTextSizeSp, "output_text_size", "module_body_text_size")
+        inputFontSizeSp = prefsInt(prefs, RetuiVisualContract.INPUT_FONT_SIZE, inputFontSizeSp, "input_font_size")
+        fontScaleOffsetSp = prefs.getInt(PREF_FONT_SCALE_OFFSET, 0).coerceIn(-3, 4)
+        moduleCornerRadiusDp = prefsInt(prefs, RetuiVisualContract.MODULE_CORNER_RADIUS, moduleCornerRadiusDp, "module_corner_radius")
+        outputCornerRadiusDp = prefsInt(prefs, RetuiVisualContract.OUTPUT_CORNER_RADIUS, outputCornerRadiusDp, "output_corner_radius")
+        headerCornerRadiusDp = prefsInt(prefs, RetuiVisualContract.HEADER_CORNER_RADIUS, headerCornerRadiusDp, "header_corner_radius")
+        topMarginDp = prefsInt(prefs, RetuiVisualContract.TOP_MARGIN, topMarginDp, "top_margin")
+        terminalBackgroundImage = prefs.getString(RetuiVisualContract.TERMINAL_BG_IMAGE, null)
+            ?: prefs.getString("terminal_bg_image", terminalBackgroundImage)
+        cyberdeckMode = prefsBool(prefs, RetuiVisualContract.CYBERDECK_MODE, cyberdeckMode, "cyberdeck_mode", "enable_cyberdeck_mode")
+        crtFilter = prefsBool(prefs, RetuiVisualContract.CRT_FILTER, crtFilter, "crt_filter", "enable_crt_filter")
+        appFontPath = prefs.getString(RetuiVisualContract.FONT_PATH, null) ?: prefs.getString("font_path", appFontPath)
+        appFontName = prefs.getString(RetuiVisualContract.FONT_NAME, null) ?: prefs.getString("font_name", appFontName)
+        applyDisplayMarginsString(
+            prefs.getString(RetuiVisualContract.DISPLAY_MARGIN_TOP, null)
+                ?: prefs.getString("display_margin_top_section", null)
+                ?: prefs.getString("display_margin_mm", null)
+        )
+    }
+
+    private fun prefsInt(prefs: SharedPreferences, key: String, fallback: Int, vararg legacy: String): Int {
+        if (prefs.contains(key)) return prefs.getInt(key, fallback)
+        for (candidate in legacy) {
+            if (prefs.contains(candidate)) return prefs.getInt(candidate, fallback)
+        }
+        return fallback
+    }
+
+    private fun prefsBool(prefs: SharedPreferences, key: String, fallback: Boolean, vararg legacy: String): Boolean {
+        if (prefs.contains(key)) return prefs.getBoolean(key, fallback)
+        for (candidate in legacy) {
+            if (prefs.contains(candidate)) return prefs.getBoolean(candidate, fallback)
+        }
+        return fallback
     }
 
     private fun applyThemePayload(intent: Intent?) {
-        bgColor = FmVisualInterop.readColorExtra(intent, bgColor, EXTRA_THEME_BG)
-        panelColor = FmVisualInterop.readColorExtra(intent, panelColor, EXTRA_TERMINAL_BG, "terminal_window_background_color")
-        textColor = FmVisualInterop.readColorExtra(intent, textColor, EXTRA_THEME_TEXT)
-        borderColor = FmVisualInterop.readColorExtra(intent, borderColor, EXTRA_THEME_BORDER)
-        modulePanelColor = FmVisualInterop.readColorExtra(intent, modulePanelColor, EXTRA_MODULE_BG_COLOR, "terminal_window_background_color")
-        moduleTextColor = FmVisualInterop.readColorExtra(intent, moduleTextColor, EXTRA_MODULE_TEXT_COLOR)
-        moduleBorderColor = FmVisualInterop.readColorExtra(intent, moduleBorderColor, EXTRA_MODULE_BORDER_COLOR)
-        headerPanelColor = FmVisualInterop.readColorExtra(intent, headerPanelColor, EXTRA_MODULE_HEADER_BG_COLOR)
-        headerTextColor = FmVisualInterop.readColorExtra(intent, headerTextColor, EXTRA_MODULE_HEADER_TEXT_COLOR)
-        moduleButtonBgColor = FmVisualInterop.readColorExtra(intent, moduleButtonBgColor, EXTRA_MODULE_BUTTON_BG_COLOR, "module_button_background_color")
-        moduleButtonTextColor = FmVisualInterop.readColorExtra(intent, moduleButtonTextColor, EXTRA_MODULE_BUTTON_TEXT_COLOR)
-        moduleButtonBorderColor = FmVisualInterop.readColorExtra(intent, moduleButtonBorderColor, EXTRA_MODULE_BUTTON_BORDER_COLOR)
-        inputBgColor = FmVisualInterop.readColorExtra(intent, inputBgColor, EXTRA_INPUT_BG_COLOR, "input_background_color")
-        inputTextColor = FmVisualInterop.readColorExtra(intent, inputTextColor, EXTRA_INPUT_TEXT_COLOR)
-        outputPanelColor = FmVisualInterop.readColorExtra(intent, outputPanelColor, EXTRA_OUTPUT_BG_COLOR, "output_background_color")
-        outputTextColor = FmVisualInterop.readColorExtra(intent, outputTextColor, EXTRA_OUTPUT_TEXT_COLOR)
-        outputBorderColor = FmVisualInterop.readColorExtra(intent, outputBorderColor, EXTRA_OUTPUT_BORDER_COLOR)
-        outputPanelColor = FmVisualInterop.readColorExtra(intent, outputPanelColor, EXTRA_FM_PANEL_BG_COLOR)
-        outputBorderColor = FmVisualInterop.readColorExtra(intent, outputBorderColor, EXTRA_FM_BORDER_COLOR)
-        fileTextColor = FmVisualInterop.readColorExtra(intent, fileTextColor, EXTRA_FM_TEXT_COLOR)
-        directoryTextColor = FmVisualInterop.readColorExtra(intent, directoryTextColor, EXTRA_FM_DIRECTORY_TEXT_COLOR)
-        selectionBgColor = FmVisualInterop.readColorExtra(intent, selectionBgColor, EXTRA_FM_SELECTION_BG_COLOR)
-        selectionTextColor = FmVisualInterop.readColorExtra(intent, selectionTextColor, EXTRA_FM_SELECTION_TEXT_COLOR)
-        headerPanelColor = FmVisualInterop.readColorExtra(intent, headerPanelColor, EXTRA_FM_HEADER_BG_COLOR)
-        headerTextColor = FmVisualInterop.readColorExtra(intent, headerTextColor, EXTRA_FM_HEADER_TEXT_COLOR)
-        moduleButtonBgColor = FmVisualInterop.readColorExtra(intent, moduleButtonBgColor, EXTRA_FM_BUTTON_BG_COLOR)
-        moduleButtonTextColor = FmVisualInterop.readColorExtra(intent, moduleButtonTextColor, EXTRA_FM_BUTTON_TEXT_COLOR)
-        moduleButtonBorderColor = FmVisualInterop.readColorExtra(intent, moduleButtonBorderColor, EXTRA_FM_BUTTON_BORDER_COLOR)
-        headerTextSizeSp = intExtra(intent, EXTRA_HEADER_TEXT_SIZE, headerTextSizeSp, "module_header_text_size")
-        outputTextSizeSp = intExtra(intent, EXTRA_OUTPUT_TEXT_SIZE, outputTextSizeSp, "module_body_text_size")
-        inputFontSizeSp = intExtra(intent, EXTRA_INPUT_FONT_SIZE, inputFontSizeSp)
-        moduleCornerRadiusDp = intExtra(intent, EXTRA_MODULE_CORNER_RADIUS, moduleCornerRadiusDp)
-        outputCornerRadiusDp = intExtra(intent, EXTRA_OUTPUT_CORNER_RADIUS, outputCornerRadiusDp)
-        headerCornerRadiusDp = intExtra(intent, EXTRA_HEADER_CORNER_RADIUS, headerCornerRadiusDp)
-        topMarginDp = intExtra(intent, EXTRA_TOP_MARGIN, topMarginDp)
+        bgColor = RetuiVisualContract.color(intent, bgColor, RetuiVisualContract.BG)
+        panelColor = RetuiVisualContract.color(intent, panelColor, RetuiVisualContract.TERMINAL_BG)
+        textColor = RetuiVisualContract.color(intent, textColor, RetuiVisualContract.TEXT)
+        borderColor = RetuiVisualContract.color(intent, borderColor, RetuiVisualContract.BORDER)
+        modulePanelColor = RetuiVisualContract.color(intent, modulePanelColor, RetuiVisualContract.PANEL_BG)
+        moduleTextColor = RetuiVisualContract.color(intent, moduleTextColor, RetuiVisualContract.PANEL_TEXT)
+        moduleBorderColor = RetuiVisualContract.color(intent, moduleBorderColor, RetuiVisualContract.PANEL_BORDER)
+        headerPanelColor = RetuiVisualContract.color(intent, headerPanelColor, RetuiVisualContract.HEADER_BG)
+        headerTextColor = RetuiVisualContract.color(intent, headerTextColor, RetuiVisualContract.HEADER_TEXT)
+        moduleButtonBgColor = RetuiVisualContract.color(intent, moduleButtonBgColor, RetuiVisualContract.BUTTON_BG)
+        moduleButtonTextColor = RetuiVisualContract.color(intent, moduleButtonTextColor, RetuiVisualContract.BUTTON_TEXT)
+        moduleButtonBorderColor = RetuiVisualContract.color(intent, moduleButtonBorderColor, RetuiVisualContract.BUTTON_BORDER)
+        inputBgColor = RetuiVisualContract.color(intent, inputBgColor, RetuiVisualContract.INPUT_BG)
+        inputTextColor = RetuiVisualContract.color(intent, inputTextColor, RetuiVisualContract.INPUT_TEXT)
+        outputPanelColor = RetuiVisualContract.color(intent, outputPanelColor, RetuiVisualContract.OUTPUT_BG)
+        outputTextColor = RetuiVisualContract.color(intent, outputTextColor, RetuiVisualContract.OUTPUT_TEXT)
+        outputBorderColor = RetuiVisualContract.color(intent, outputBorderColor, RetuiVisualContract.OUTPUT_BORDER)
+        fileTextColor = RetuiVisualContract.color(intent, fileTextColor, RetuiVisualContract.TEXT)
+        directoryTextColor = RetuiVisualContract.color(intent, directoryTextColor, RetuiVisualContract.DIRECTORY_TEXT)
+        selectionBgColor = RetuiVisualContract.color(intent, selectionBgColor, RetuiVisualContract.SELECTION_BG)
+        selectionTextColor = RetuiVisualContract.color(intent, selectionTextColor, RetuiVisualContract.SELECTION_TEXT)
+        headerTextSizeSp = RetuiVisualContract.int(intent, headerTextSizeSp, RetuiVisualContract.HEADER_TEXT_SIZE)
+        outputTextSizeSp = RetuiVisualContract.int(intent, outputTextSizeSp, RetuiVisualContract.BODY_TEXT_SIZE)
+        inputFontSizeSp = RetuiVisualContract.int(intent, inputFontSizeSp, RetuiVisualContract.INPUT_FONT_SIZE)
+        moduleCornerRadiusDp = RetuiVisualContract.int(intent, moduleCornerRadiusDp, RetuiVisualContract.MODULE_CORNER_RADIUS)
+        outputCornerRadiusDp = RetuiVisualContract.int(intent, outputCornerRadiusDp, RetuiVisualContract.OUTPUT_CORNER_RADIUS)
+        headerCornerRadiusDp = RetuiVisualContract.int(intent, headerCornerRadiusDp, RetuiVisualContract.HEADER_CORNER_RADIUS)
+        topMarginDp = RetuiVisualContract.int(intent, topMarginDp, RetuiVisualContract.TOP_MARGIN)
         applyLauncherDisplayMargins(intent)
-        cyberdeckMode = booleanExtra(intent, EXTRA_CYBERDECK_MODE, cyberdeckMode, "enable_cyberdeck_mode")
-        crtFilter = booleanExtra(intent, EXTRA_CRT_FILTER, crtFilter, "enable_crt_filter")
-        intent?.getStringExtra(EXTRA_TERMINAL_BG_IMAGE)?.let { terminalBackgroundImage = it }
+        cyberdeckMode = RetuiVisualContract.boolean(intent, cyberdeckMode, RetuiVisualContract.CYBERDECK_MODE)
+        crtFilter = RetuiVisualContract.boolean(intent, crtFilter, RetuiVisualContract.CRT_FILTER)
+        RetuiVisualContract.string(intent, RetuiVisualContract.TERMINAL_BG_IMAGE)?.let { terminalBackgroundImage = it }
         var appliedFont = false
-        val fontFileExtra = stringExtra(intent, EXTRA_FONT_FILE, "launcher_font_file")
-        stringExtra(intent, EXTRA_FONT_PATH)?.takeIf { it.isNotBlank() }?.let {
+        val fontFileExtra = RetuiVisualContract.string(intent, RetuiVisualContract.FONT_FILE)
+        RetuiVisualContract.string(intent, RetuiVisualContract.FONT_PATH)?.let {
             val resolved = fontPathFromPayload(it, fontFileExtra)
             if (!resolved.isNullOrBlank()) {
                 appFontPath = resolved
@@ -3086,7 +3137,7 @@ open class MainActivity : Activity() {
                     appliedFont = true
                 }
         }
-        if (!appliedFont) stringExtra(intent, EXTRA_FONT_NAME)?.takeIf { it.isNotBlank() }?.let {
+        if (!appliedFont) RetuiVisualContract.string(intent, RetuiVisualContract.FONT_NAME)?.let {
             appFontName = it
             appFontPath = null
         }
@@ -3094,56 +3145,47 @@ open class MainActivity : Activity() {
 
     private fun saveThemePayload(prefs: SharedPreferences, intent: Intent?) {
         val editor = prefs.edit()
-        editor.putInt(EXTRA_THEME_BG, bgColor)
-        editor.putInt(EXTRA_TERMINAL_BG, panelColor)
-        editor.putInt(EXTRA_THEME_TEXT, textColor)
-        editor.putInt(EXTRA_THEME_BORDER, borderColor)
-        editor.putInt(EXTRA_MODULE_BG_COLOR, modulePanelColor)
-        editor.putInt(EXTRA_MODULE_TEXT_COLOR, moduleTextColor)
-        editor.putInt(EXTRA_MODULE_BORDER_COLOR, moduleBorderColor)
-        editor.putInt(EXTRA_MODULE_HEADER_BG_COLOR, headerPanelColor)
-        editor.putInt(EXTRA_MODULE_HEADER_TEXT_COLOR, headerTextColor)
-        editor.putInt(EXTRA_MODULE_BUTTON_BG_COLOR, moduleButtonBgColor)
-        editor.putInt(EXTRA_MODULE_BUTTON_TEXT_COLOR, moduleButtonTextColor)
-        editor.putInt(EXTRA_MODULE_BUTTON_BORDER_COLOR, moduleButtonBorderColor)
-        editor.putInt(EXTRA_INPUT_BG_COLOR, inputBgColor)
-        editor.putInt(EXTRA_INPUT_TEXT_COLOR, inputTextColor)
-        editor.putInt(EXTRA_OUTPUT_BG_COLOR, outputPanelColor)
-        editor.putInt(EXTRA_OUTPUT_TEXT_COLOR, outputTextColor)
-        editor.putInt(EXTRA_OUTPUT_BORDER_COLOR, outputBorderColor)
-        editor.putInt(EXTRA_FM_TEXT_COLOR, fileTextColor)
-        editor.putInt(EXTRA_FM_DIRECTORY_TEXT_COLOR, directoryTextColor)
-        editor.putInt(EXTRA_FM_SELECTION_BG_COLOR, selectionBgColor)
-        editor.putInt(EXTRA_FM_SELECTION_TEXT_COLOR, selectionTextColor)
-        editor.putInt(EXTRA_HEADER_TEXT_SIZE, headerTextSizeSp)
-        editor.putInt(EXTRA_OUTPUT_TEXT_SIZE, outputTextSizeSp)
-        editor.putInt(EXTRA_INPUT_FONT_SIZE, inputFontSizeSp)
-        editor.putInt(EXTRA_MODULE_CORNER_RADIUS, moduleCornerRadiusDp)
-        editor.putInt(EXTRA_OUTPUT_CORNER_RADIUS, outputCornerRadiusDp)
-        editor.putInt(EXTRA_HEADER_CORNER_RADIUS, headerCornerRadiusDp)
-        editor.putInt(EXTRA_TOP_MARGIN, topMarginDp)
-        editor.putBoolean(EXTRA_CYBERDECK_MODE, cyberdeckMode)
-        editor.putBoolean(EXTRA_CRT_FILTER, crtFilter)
-        editor.putString(EXTRA_TERMINAL_BG_IMAGE, terminalBackgroundImage)
-        editor.putString(EXTRA_FONT_PATH, appFontPath)
-        editor.putString(EXTRA_FONT_NAME, appFontName)
-        displayMarginsString(intent)?.let { editor.putString(EXTRA_DISPLAY_MARGIN_TOP_SECTION, it) }
+        editor.putInt(RetuiVisualContract.BG, bgColor)
+        editor.putInt(RetuiVisualContract.TERMINAL_BG, panelColor)
+        editor.putInt(RetuiVisualContract.TEXT, textColor)
+        editor.putInt(RetuiVisualContract.BORDER, borderColor)
+        editor.putInt(RetuiVisualContract.PANEL_BG, modulePanelColor)
+        editor.putInt(RetuiVisualContract.PANEL_TEXT, moduleTextColor)
+        editor.putInt(RetuiVisualContract.PANEL_BORDER, moduleBorderColor)
+        editor.putInt(RetuiVisualContract.HEADER_BG, headerPanelColor)
+        editor.putInt(RetuiVisualContract.HEADER_TEXT, headerTextColor)
+        editor.putInt(RetuiVisualContract.BUTTON_BG, moduleButtonBgColor)
+        editor.putInt(RetuiVisualContract.BUTTON_TEXT, moduleButtonTextColor)
+        editor.putInt(RetuiVisualContract.BUTTON_BORDER, moduleButtonBorderColor)
+        editor.putInt(RetuiVisualContract.INPUT_BG, inputBgColor)
+        editor.putInt(RetuiVisualContract.INPUT_TEXT, inputTextColor)
+        editor.putInt(RetuiVisualContract.OUTPUT_BG, outputPanelColor)
+        editor.putInt(RetuiVisualContract.OUTPUT_TEXT, outputTextColor)
+        editor.putInt(RetuiVisualContract.OUTPUT_BORDER, outputBorderColor)
+        editor.putInt(RetuiVisualContract.DIRECTORY_TEXT, directoryTextColor)
+        editor.putInt(RetuiVisualContract.SELECTION_BG, selectionBgColor)
+        editor.putInt(RetuiVisualContract.SELECTION_TEXT, selectionTextColor)
+        editor.putInt(RetuiVisualContract.HEADER_TEXT_SIZE, headerTextSizeSp)
+        editor.putInt(RetuiVisualContract.BODY_TEXT_SIZE, outputTextSizeSp)
+        editor.putInt(RetuiVisualContract.INPUT_FONT_SIZE, inputFontSizeSp)
+        editor.putInt(RetuiVisualContract.MODULE_CORNER_RADIUS, moduleCornerRadiusDp)
+        editor.putInt(RetuiVisualContract.OUTPUT_CORNER_RADIUS, outputCornerRadiusDp)
+        editor.putInt(RetuiVisualContract.HEADER_CORNER_RADIUS, headerCornerRadiusDp)
+        editor.putInt(RetuiVisualContract.TOP_MARGIN, topMarginDp)
+        editor.putBoolean(RetuiVisualContract.CYBERDECK_MODE, cyberdeckMode)
+        editor.putBoolean(RetuiVisualContract.CRT_FILTER, crtFilter)
+        editor.putString(RetuiVisualContract.TERMINAL_BG_IMAGE, terminalBackgroundImage)
+        editor.putString(RetuiVisualContract.FONT_PATH, appFontPath)
+        editor.putString(RetuiVisualContract.FONT_NAME, appFontName)
+        displayMarginsString(intent)?.let { editor.putString(RetuiVisualContract.DISPLAY_MARGIN_TOP, it) }
         editor.apply()
-    }
-
-    private fun hasThemePayload(intent: Intent?): Boolean {
-        val extras = intent?.extras ?: return false
-        for (key in THEME_PAYLOAD_KEYS) {
-            if (extras.containsKey(key)) return true
-        }
-        return false
     }
 
     private fun shouldUseLauncherFontFallback(intent: Intent?): Boolean {
         if (intent?.extras == null) return true
-        val path = stringExtra(intent, EXTRA_FONT_PATH)
-        val fontFile = stringExtra(intent, EXTRA_FONT_FILE, "launcher_font_file")
-        val name = stringExtra(intent, EXTRA_FONT_NAME)
+        val path = RetuiVisualContract.string(intent, RetuiVisualContract.FONT_PATH)
+        val fontFile = RetuiVisualContract.string(intent, RetuiVisualContract.FONT_FILE)
+        val name = RetuiVisualContract.string(intent, RetuiVisualContract.FONT_NAME)
         if (!path.isNullOrEmpty() && fontPathUsableForPayload(path, fontFile)) return false
         if (!fontFile.isNullOrEmpty() && resolveLauncherFontFile(fontFile) != null) return false
         if (!path.isNullOrEmpty()) return true
@@ -3170,9 +3212,7 @@ open class MainActivity : Activity() {
     }
 
     private fun displayMarginsString(intent: Intent?): String? {
-        val extras = intent?.extras ?: return null
-        return extras.getString(EXTRA_DISPLAY_MARGIN_TOP_SECTION)
-            ?: extras.getString(EXTRA_DISPLAY_MARGIN_MM)
+        return RetuiVisualContract.string(intent, RetuiVisualContract.DISPLAY_MARGIN_TOP)
     }
 
     private fun applyDisplayMarginsString(raw: String?) {
@@ -3298,8 +3338,9 @@ open class MainActivity : Activity() {
         } catch (_: Exception) {
             return null
         }
-        val value = xmlValue(xml, EXTRA_CRT_VIGNETTE)
-            ?: xmlValue(xml, EXTRA_CRT_VIGNETTE_ALIAS)
+        val value = xmlValue(xml, RetuiVisualContract.CRT_VIGNETTE)
+            ?: xmlValue(xml, "enable_crt_vignette")
+            ?: xmlValue(xml, "crt_vignette")
             ?: return null
         return value.equals("true", true) || value == "1"
     }
@@ -3330,13 +3371,30 @@ open class MainActivity : Activity() {
         return Typeface.MONOSPACE
     }
 
-    private fun panelDrawable(role: PanelRole): Drawable {
+    private fun applyLocalFontOverride(prefs: SharedPreferences) {
+        when (prefs.getString(PREF_FONT_MODE, null)) {
+            FONT_MODE_CUSTOM -> {
+                appFontPath = prefs.getString(PREF_CUSTOM_FONT_PATH, null)?.takeIf(::fontPathUsable)
+                appFontName = null
+            }
+            FONT_MODE_SYSTEM -> {
+                appFontPath = null
+                appFontName = "system"
+            }
+            FONT_MODE_DEFAULT -> {
+                appFontPath = null
+                appFontName = null
+            }
+        }
+    }
+
+    private fun panelDrawable(role: PanelRole, interactive: Boolean = false): Drawable {
         val fill = when (role) {
-            PanelRole.OUTER -> withAlpha(outputPanelColor, 226)
+            PanelRole.OUTER -> FmVisualInterop.scaleColorAlpha(outputPanelColor, 226)
             PanelRole.HEADER -> headerPanelColor
             PanelRole.INPUT -> inputBgColor
             PanelRole.MODULE -> modulePanelColor
-            PanelRole.OUTPUT -> withAlpha(outputPanelColor, 238)
+            PanelRole.OUTPUT -> FmVisualInterop.scaleColorAlpha(outputPanelColor, 238)
         }
         val stroke = when (role) {
             PanelRole.OUTER -> outputBorderColor
@@ -3351,57 +3409,63 @@ open class MainActivity : Activity() {
             PanelRole.OUTPUT -> outputCornerRadiusDp
             else -> moduleCornerRadiusDp
         }
-        if (cyberdeckMode) {
-            return CyberPanelDrawable(fill, stroke, max(1f, dpFloat(if (role == PanelRole.MODULE || role == PanelRole.INPUT) 1f else 1.25f)), role != PanelRole.MODULE && role != PanelRole.INPUT)
+        val fallback = if (cyberdeckMode) {
+            CyberPanelDrawable(fill, stroke, max(1f, dpFloat(if (role == PanelRole.MODULE || role == PanelRole.INPUT) 1f else 1.25f)), role != PanelRole.MODULE && role != PanelRole.INPUT)
+        } else {
+            GradientDrawable().apply {
+                setColor(fill)
+                setStroke(max(1, dp(1)), stroke)
+                cornerRadius = dp(radius).toFloat()
+            }
         }
-        val drawable = GradientDrawable()
-        drawable.setColor(fill)
-        drawable.setStroke(max(1, dp(1)), stroke)
-        drawable.cornerRadius = dp(radius).toFloat()
-        return drawable
+        if (role == PanelRole.OUTER) return fallback
+        return launcherFrameRuntime?.drawable(fallback, interactive) ?: fallback
     }
 
     private fun buttonDrawable(): Drawable {
-        if (cyberdeckMode) {
-            return CyberPanelDrawable(withAlpha(moduleButtonBgColor, 205), moduleButtonBorderColor, max(1f, dpFloat(1f)), false)
+        val fallback = if (cyberdeckMode) {
+            CyberPanelDrawable(FmVisualInterop.scaleColorAlpha(moduleButtonBgColor, 205), moduleButtonBorderColor, max(1f, dpFloat(1f)), false)
+        } else {
+            GradientDrawable().apply {
+                setColor(FmVisualInterop.scaleColorAlpha(moduleButtonBgColor, 205))
+                setStroke(max(1, dp(1)), moduleButtonBorderColor)
+                cornerRadius = dp(moduleCornerRadiusDp).toFloat()
+            }
         }
-        val drawable = GradientDrawable()
-        drawable.setColor(withAlpha(moduleButtonBgColor, 205))
-        drawable.setStroke(max(1, dp(1)), moduleButtonBorderColor)
-        drawable.cornerRadius = dp(moduleCornerRadiusDp).toFloat()
-        return drawable
+        return launcherFrameRuntime?.drawable(fallback, interactive = true) ?: fallback
     }
 
     private fun toolbarDrawable(): Drawable {
         val drawable = GradientDrawable()
-        drawable.setColor(withAlpha(moduleButtonBgColor, 210))
+        drawable.setColor(FmVisualInterop.scaleColorAlpha(moduleButtonBgColor, 210))
         drawable.setStroke(max(1, dp(1)), moduleButtonBorderColor)
         drawable.cornerRadius = 0f
-        return drawable
+        return launcherFrameRuntime?.drawable(drawable) ?: drawable
     }
 
     private fun addressDrawable(): Drawable {
         val drawable = GradientDrawable()
-        drawable.setColor(withAlpha(outputPanelColor, 230))
+        drawable.setColor(FmVisualInterop.scaleColorAlpha(outputPanelColor, 230))
         drawable.setStroke(max(1, dp(1)), outputBorderColor)
         drawable.cornerRadius = 0f
-        return drawable
+        return launcherFrameRuntime?.drawable(drawable, interactive = true) ?: drawable
     }
 
     private fun toolbarButtonDrawable(): Drawable {
         val drawable = GradientDrawable()
-        drawable.setColor(withAlpha(outputPanelColor, 150))
+        drawable.setColor(FmVisualInterop.scaleColorAlpha(outputPanelColor, 150))
         drawable.setStroke(max(1, dp(1)), moduleButtonBorderColor)
         drawable.cornerRadius = 0f
-        return drawable
+        return launcherFrameRuntime?.drawable(drawable, interactive = true) ?: drawable
     }
 
     private fun functionButtonBackground(): Drawable {
-        return ColorDrawable(withAlpha(moduleButtonBgColor, 210))
+        val fallback = ColorDrawable(FmVisualInterop.scaleColorAlpha(moduleButtonBgColor, 210))
+        return launcherFrameRuntime?.drawable(fallback, interactive = true) ?: fallback
     }
 
     private fun rowSelectionBackground(selected: Boolean): Drawable {
-        return ColorDrawable(if (selected) withAlpha(selectionBgColor, 230) else Color.TRANSPARENT)
+        return ColorDrawable(if (selected) FmVisualInterop.scaleColorAlpha(selectionBgColor, 230) else Color.TRANSPARENT)
     }
 
     private fun clamp(value: Int, min: Int, max: Int): Int {
@@ -3532,64 +3596,34 @@ open class MainActivity : Activity() {
     companion object {
         const val EXTRA_PATH = "path"
         const val EXTRA_ACTION = "action"
-        const val EXTRA_COMMAND = "command"
+        const val EXTRA_TARGET = "target"
         const val EXTRA_SEARCH = "search"
         const val EXTRA_SEARCH_NAME = "search_name"
         const val EXTRA_SEARCH_TYPE = "search_type"
-        const val EXTRA_THEME_BG = "theme_bg"
-        const val EXTRA_TERMINAL_BG = "terminal_bg"
-        const val EXTRA_THEME_TEXT = "theme_text"
-        const val EXTRA_THEME_BORDER = "theme_border"
-        const val EXTRA_MODULE_BG_COLOR = "module_bg_color"
-        const val EXTRA_MODULE_TEXT_COLOR = "module_text_color"
-        const val EXTRA_MODULE_BORDER_COLOR = "module_border_color"
-        const val EXTRA_MODULE_HEADER_BG_COLOR = "module_header_bg_color"
-        const val EXTRA_MODULE_HEADER_TEXT_COLOR = "module_header_text_color"
-        const val EXTRA_MODULE_BUTTON_BG_COLOR = "module_button_bg_color"
-        const val EXTRA_MODULE_BUTTON_TEXT_COLOR = "module_button_text_color"
-        const val EXTRA_MODULE_BUTTON_BORDER_COLOR = "module_button_border_color"
-        const val EXTRA_INPUT_BG_COLOR = "input_bg_color"
-        const val EXTRA_INPUT_TEXT_COLOR = "input_text_color"
-        const val EXTRA_OUTPUT_BG_COLOR = "output_bg_color"
-        const val EXTRA_OUTPUT_TEXT_COLOR = "output_text_color"
-        const val EXTRA_OUTPUT_BORDER_COLOR = "output_border_color"
-        const val EXTRA_FM_PANEL_BG_COLOR = "fm_panel_background_color"
-        const val EXTRA_FM_BORDER_COLOR = "fm_border_color"
-        const val EXTRA_FM_TEXT_COLOR = "fm_text_color"
-        const val EXTRA_FM_DIRECTORY_TEXT_COLOR = "fm_directory_text_color"
-        const val EXTRA_FM_SELECTION_BG_COLOR = "fm_selection_background_color"
-        const val EXTRA_FM_SELECTION_TEXT_COLOR = "fm_selection_text_color"
-        const val EXTRA_FM_HEADER_BG_COLOR = "fm_header_background_color"
-        const val EXTRA_FM_HEADER_TEXT_COLOR = "fm_header_text_color"
-        const val EXTRA_FM_BUTTON_BG_COLOR = "fm_button_background_color"
-        const val EXTRA_FM_BUTTON_TEXT_COLOR = "fm_button_text_color"
-        const val EXTRA_FM_BUTTON_BORDER_COLOR = "fm_button_border_color"
-        const val EXTRA_TOP_MARGIN = "top_margin"
-        const val EXTRA_INPUT_FONT_SIZE = "input_font_size"
-        const val EXTRA_DISPLAY_MARGIN_MM = "display_margin_mm"
-        const val EXTRA_DISPLAY_MARGIN_TOP_SECTION = "display_margin_top_section"
-        const val EXTRA_HEADER_TEXT_SIZE = "header_text_size"
-        const val EXTRA_OUTPUT_TEXT_SIZE = "output_text_size"
-        const val EXTRA_MODULE_CORNER_RADIUS = "module_corner_radius"
-        const val EXTRA_OUTPUT_CORNER_RADIUS = "output_corner_radius"
-        const val EXTRA_HEADER_CORNER_RADIUS = "header_corner_radius"
-        const val EXTRA_FONT_PATH = "font_path"
-        const val EXTRA_FONT_FILE = "font_file"
-        const val EXTRA_FONT_NAME = "font_name"
-        const val EXTRA_TERMINAL_BG_IMAGE = "terminal_bg_image"
-        const val EXTRA_CYBERDECK_MODE = "cyberdeck_mode"
-        const val EXTRA_CRT_FILTER = "crt_filter"
-        const val EXTRA_CRT_VIGNETTE = "enable_crt_vignette"
-        private const val EXTRA_CRT_VIGNETTE_ALIAS = "crt_vignette"
+        const val EXTRA_FONT_SCALE_OFFSET = "fm_font_scale_offset"
+
         const val ACTION_SEARCH = "search"
         const val ACTION_OPEN = "open"
-        private const val ACTION_OPEN_CONSOLE = "com.dvil.retui.fm.OPEN_CONSOLE"
+        const val ACTION_LIST = "ls"
+        const val ACTION_SHARE = "share"
         private const val PREFS_NAME = "retui_fm"
         private const val PREF_CUSTOM_PLACES = "custom_places"
         private const val PREF_TRASH_DIRS = "trash_dirs"
         private const val PREF_TRASH_RETENTION_DAYS = "trash_retention_days"
         private const val PREF_TRASH_RETENTION_INITIALIZED = "trash_retention_initialized"
         private const val PREF_LAST_TRASH_CLEANUP = "last_trash_cleanup"
+        private const val PREF_FONT_SCALE_OFFSET = "font_scale_offset"
+        private const val PREF_FONT_MODE = "font_override_mode"
+        private const val PREF_CUSTOM_FONT_PATH = "custom_font_path"
+        private const val FONT_MODE_CUSTOM = "custom"
+        private const val FONT_MODE_SYSTEM = "system"
+        private const val FONT_MODE_DEFAULT = "default"
+        private const val FONT_IMPORT_REQUEST = 205
+        private const val MAX_FONT_BYTES = 32L * 1024L * 1024L
+        private val FONT_MIME_TYPES = arrayOf(
+            "font/ttf", "font/otf", "application/x-font-ttf", "application/x-font-otf",
+            "application/vnd.ms-opentype", "application/font-sfnt", "application/octet-stream"
+        )
         private const val DEFAULT_TRASH_RETENTION_DAYS = 30
         private const val DAY_MILLIS = 24L * 60L * 60L * 1000L
         private const val MAX_ROWS = 5000
@@ -3640,53 +3674,6 @@ open class MainActivity : Activity() {
             "application/x-bzip2",
             "application/x-xz",
             "application/java-archive"
-        )
-        private val THEME_PAYLOAD_KEYS = arrayOf(
-            EXTRA_THEME_BG,
-            EXTRA_TERMINAL_BG,
-            EXTRA_THEME_TEXT,
-            EXTRA_THEME_BORDER,
-            EXTRA_MODULE_BG_COLOR,
-            EXTRA_MODULE_TEXT_COLOR,
-            EXTRA_MODULE_BORDER_COLOR,
-            EXTRA_MODULE_HEADER_BG_COLOR,
-            EXTRA_MODULE_HEADER_TEXT_COLOR,
-            EXTRA_MODULE_BUTTON_BG_COLOR,
-            EXTRA_MODULE_BUTTON_TEXT_COLOR,
-            EXTRA_MODULE_BUTTON_BORDER_COLOR,
-            EXTRA_INPUT_BG_COLOR,
-            EXTRA_INPUT_TEXT_COLOR,
-            EXTRA_OUTPUT_BG_COLOR,
-            EXTRA_OUTPUT_TEXT_COLOR,
-            EXTRA_OUTPUT_BORDER_COLOR,
-            EXTRA_FM_PANEL_BG_COLOR,
-            EXTRA_FM_BORDER_COLOR,
-            EXTRA_FM_TEXT_COLOR,
-            EXTRA_FM_DIRECTORY_TEXT_COLOR,
-            EXTRA_FM_SELECTION_BG_COLOR,
-            EXTRA_FM_SELECTION_TEXT_COLOR,
-            EXTRA_FM_HEADER_BG_COLOR,
-            EXTRA_FM_HEADER_TEXT_COLOR,
-            EXTRA_FM_BUTTON_BG_COLOR,
-            EXTRA_FM_BUTTON_TEXT_COLOR,
-            EXTRA_FM_BUTTON_BORDER_COLOR,
-            EXTRA_TOP_MARGIN,
-            EXTRA_INPUT_FONT_SIZE,
-            EXTRA_DISPLAY_MARGIN_MM,
-            EXTRA_DISPLAY_MARGIN_TOP_SECTION,
-            EXTRA_HEADER_TEXT_SIZE,
-            EXTRA_OUTPUT_TEXT_SIZE,
-            EXTRA_MODULE_CORNER_RADIUS,
-            EXTRA_OUTPUT_CORNER_RADIUS,
-            EXTRA_HEADER_CORNER_RADIUS,
-            EXTRA_FONT_PATH,
-            EXTRA_FONT_FILE,
-            EXTRA_FONT_NAME,
-            EXTRA_TERMINAL_BG_IMAGE,
-            EXTRA_CYBERDECK_MODE,
-            "enable_cyberdeck_mode",
-            EXTRA_CRT_FILTER,
-            "enable_crt_filter"
         )
     }
 }
