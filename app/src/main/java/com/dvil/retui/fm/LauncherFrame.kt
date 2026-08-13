@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.ColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
@@ -26,6 +27,7 @@ import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 internal data class LauncherFrameSpec(
@@ -287,6 +289,8 @@ internal class LauncherFrameStore(private val context: Context) {
 }
 
 internal class FilesFrameRuntime private constructor(private val asset: LauncherFrameAsset?) {
+    val textColor: Int? = asset?.textColor
+
     fun drawable(fallback: Drawable, interactive: Boolean = false): Drawable = asset?.drawable()?.let {
         val layered = LayerDrawable(arrayOf(fallback, it))
         if (interactive) StatefulFrameDrawable(layered) else layered
@@ -335,7 +339,39 @@ private class StatefulFrameDrawable(private val frame: Drawable) : Drawable() {
 
 internal class LauncherFrameAsset(bitmap: Bitmap, private val spec: LauncherFrameSpec, private val density: Float) {
     private val parts = FrameParts(bitmap, spec)
+    val textColor = frameTextColor(parts.center)
+
     fun drawable(): Drawable = LauncherFrameDrawable(parts, spec, density)
+}
+
+private fun frameTextColor(bitmap: Bitmap): Int {
+    var red = 0L
+    var green = 0L
+    var blue = 0L
+    var weight = 0L
+    val stepX = maxOf(1, bitmap.width / 32)
+    val stepY = maxOf(1, bitmap.height / 32)
+    for (y in 0 until bitmap.height step stepY) {
+        for (x in 0 until bitmap.width step stepX) {
+            val pixel = bitmap.getPixel(x, y)
+            val alpha = Color.alpha(pixel).toLong()
+            red += Color.red(pixel) * alpha
+            green += Color.green(pixel) * alpha
+            blue += Color.blue(pixel) * alpha
+            weight += alpha
+        }
+    }
+    if (weight == 0L) return 0xffffffff.toInt()
+    return contrastTextColor((red / weight).toInt(), (green / weight).toInt(), (blue / weight).toInt())
+}
+
+internal fun contrastTextColor(red: Int, green: Int, blue: Int): Int {
+    fun linear(value: Int): Double {
+        val channel = value.coerceIn(0, 255) / 255.0
+        return if (channel <= 0.04045) channel / 12.92 else ((channel + 0.055) / 1.055).pow(2.4)
+    }
+    val luminance = 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+    return if (luminance > 0.179) 0xff000000.toInt() else 0xffffffff.toInt()
 }
 
 private class FrameParts(bitmap: Bitmap, spec: LauncherFrameSpec) {

@@ -59,4 +59,10 @@ class LauncherFrameTest {
         assertTrue(LauncherFrameMath.boundaries(0, 60, 30f, 30f).contentEquals(floatArrayOf(0f, 30f, 30f, 60f)))
         assertTrue(LauncherFrameMath.boundaries(0, 5, 2f, 3f).contentEquals(floatArrayOf(0f, 2f, 2f, 5f)))
     }
+
+    @Test
+    fun frameTextUsesReadableBlackOrWhiteContrast() {
+        assertEquals(0xff000000.toInt(), contrastTextColor(224, 214, 144))
+        assertEquals(0xffffffff.toInt(), contrastTextColor(20, 24, 40))
+    }
 }

@@ -400,6 +400,12 @@ class FmEditorActivity : Activity() {
         crtVignette = RetuiVisualContract.boolean(intent, crtVignette, RetuiVisualContract.CRT_VIGNETTE)
         terminalBackgroundImage = RetuiVisualContract.string(intent, RetuiVisualContract.TERMINAL_BG_IMAGE)
         appTypeface = resolveTypeface()
+        launcherFrameRuntime?.textColor?.let { color ->
+            textColor = color
+            headerTextColor = color
+            buttonTextColor = color
+            outputTextColor = color
+        }
     }
 
     private fun resolveTypeface(): Typeface? {

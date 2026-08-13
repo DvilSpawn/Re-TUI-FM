@@ -2985,6 +2985,17 @@ open class MainActivity : Activity() {
         if (RetuiVisualContract.hasVisualPayload(intent)) saveThemePayload(prefs, intent)
         applyLocalFontOverride(prefs)
         appTypeface = resolveTypeface()
+        launcherFrameRuntime?.textColor?.let { color ->
+            textColor = color
+            inputTextColor = color
+            outputTextColor = color
+            fileTextColor = color
+            directoryTextColor = color
+            selectionTextColor = color
+            moduleTextColor = color
+            headerTextColor = color
+            moduleButtonTextColor = color
+        }
     }
 
     private fun putThemeExtras(intent: Intent) {
@@ -3465,7 +3476,9 @@ open class MainActivity : Activity() {
     }
 
     private fun rowSelectionBackground(selected: Boolean): Drawable {
-        return ColorDrawable(if (selected) FmVisualInterop.scaleColorAlpha(selectionBgColor, 230) else Color.TRANSPARENT)
+        if (!selected) return ColorDrawable(Color.TRANSPARENT)
+        val fallback = ColorDrawable(FmVisualInterop.scaleColorAlpha(selectionBgColor, 230))
+        return launcherFrameRuntime?.drawable(fallback) ?: fallback
     }
 
     private fun clamp(value: Int, min: Int, max: Int): Int {
