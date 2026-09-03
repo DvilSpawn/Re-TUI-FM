@@ -37,8 +37,8 @@ android {
         applicationId "com.dvil.retui.fm"
         minSdk 26
         targetSdk 36
-        versionCode 16
-        versionName "0.1.15"
+        versionCode 17
+        versionName "0.1.16"
     }
 
     buildTypes {
@@ -67,5 +67,8 @@ kotlin {
 dependencies {
     implementation project(':retui-contract')
     implementation 'androidx.core:core:1.13.1'
+    implementation 'org.apache.commons:commons-compress:1.28.0'
+    implementation 'org.tukaani:xz:1.12'
+    implementation 'com.github.junrar:junrar:8.1.0'
     testImplementation 'junit:junit:4.13.2'
 }

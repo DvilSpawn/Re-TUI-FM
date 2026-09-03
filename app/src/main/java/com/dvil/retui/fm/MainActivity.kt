@@ -74,8 +74,12 @@ open class MainActivity : Activity() {
         val isParent: Boolean = false,
         val isSection: Boolean = false,
         val contentUri: Uri? = null,
-        val isTrashPlace: Boolean = false
+        val isTrashPlace: Boolean = false,
+        val archivePath: String? = null,
+        val size: Long = 0
     )
+
+    private data class PendingArchiveExtraction(val archive: File, val selected: Set<String>)
 
     private data class FileCategory(
         val label: String,
@@ -124,6 +128,11 @@ open class MainActivity : Activity() {
     private var rightSortMode = SortMode.NAME_ASC
     private var currentScreen = Screen.HOME
     private var rightVirtualTitle: String? = null
+    private var activeArchive: File? = null
+    private var archiveEntries: List<ArchiveExtractor.Entry> = emptyList()
+    private var archiveDirectory = ""
+    private var archiveLoadVersion = 0
+    private var pendingArchiveExtraction: PendingArchiveExtraction? = null
     private var activeCategory: FileCategory? = null
     private var categoryLoadVersion = 0
     private var homeCountVersion = 0
@@ -221,6 +230,10 @@ open class MainActivity : Activity() {
         selectedPaths.clear()
         pendingCopyPaths.clear()
         pendingMovePaths.clear()
+        activeArchive = null
+        archiveEntries = emptyList()
+        archiveDirectory = ""
+        pendingArchiveExtraction = null
         shareSelectionMode = false
         applyThemeExtras(intent)
         configureIncomingMode(intent)
@@ -264,6 +277,11 @@ open class MainActivity : Activity() {
     override fun onBackPressed() {
         if (selectedPaths.isNotEmpty() || shareSelectionMode) {
             closeShareSelection()
+            return
+        }
+        if (activeArchive != null) {
+            if (archiveDirectory.isNotEmpty()) showArchiveDirectory(ArchiveExtractor.parent(archiveDirectory))
+            else closeArchive()
             return
         }
         if (currentScreen == Screen.HOME) {
@@ -368,7 +386,7 @@ open class MainActivity : Activity() {
         row.gravity = Gravity.CENTER_VERTICAL
         row.setPadding(dp(6), dp(3), dp(6), dp(3))
         row.background = toolbarDrawable()
-        row.visibility = if (shareSelectionMode || selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty() || pendingMovePaths.isNotEmpty()) View.VISIBLE else View.GONE
+        row.visibility = if (shareSelectionMode || activeArchive != null || pendingArchiveExtraction != null || selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty() || pendingMovePaths.isNotEmpty()) View.VISIBLE else View.GONE
         updateSelectionBar()
         return row
     }
@@ -376,9 +394,30 @@ open class MainActivity : Activity() {
     private fun updateSelectionBar() {
         val row = selectionBar ?: return
         row.removeAllViews()
-        val hasWork = shareSelectionMode || selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty() || pendingMovePaths.isNotEmpty()
+        val hasWork = shareSelectionMode || activeArchive != null || pendingArchiveExtraction != null || selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty() || pendingMovePaths.isNotEmpty()
         row.visibility = if (hasWork && currentScreen == Screen.TREE) View.VISIBLE else View.GONE
         if (!hasWork) return
+        activeArchive?.let { archive ->
+            val count = label(if (selectedPaths.isEmpty()) archive.name else "${selectedPaths.size} selected", max(10, outputTextSizeSp - 2), true)
+            count.gravity = Gravity.CENTER_VERTICAL
+            count.setTextColor(moduleTextColor)
+            row.addView(count, LinearLayout.LayoutParams(0, -1, 1f))
+            addSelectionAction(row, if (selectedPaths.isEmpty()) "EXTRACT ALL" else "EXTRACT") { extractArchiveNamed() }
+            addSelectionAction(row, "EXTRACT HERE") { extractArchiveHere() }
+            addSelectionAction(row, "EXTRACT TO") { prepareArchiveExtractTo() }
+            if (selectedPaths.isNotEmpty()) addSelectionAction(row, "X") { clearArchiveSelection() }
+            return
+        }
+        pendingArchiveExtraction?.let { request ->
+            val text = if (request.selected.isEmpty()) request.archive.name else "${request.selected.size} ready to extract"
+            val count = label(text, max(10, outputTextSizeSp - 2), true)
+            count.gravity = Gravity.CENTER_VERTICAL
+            count.setTextColor(moduleTextColor)
+            row.addView(count, LinearLayout.LayoutParams(0, -1, 1f))
+            addSelectionAction(row, "EXTRACT HERE") { confirmArchiveExtractHere() }
+            addSelectionAction(row, "X") { cancelArchiveExtraction() }
+            return
+        }
         val countText = when {
             shareSelectionMode && selectedPaths.isEmpty() -> "Select files to share"
             selectedPaths.isNotEmpty() -> "${selectedPaths.size} selected"
@@ -422,7 +461,16 @@ open class MainActivity : Activity() {
         button.setOnClickListener { action() }
         val params = LinearLayout.LayoutParams(-2, -1)
         params.leftMargin = dp(4)
-        params.width = dp(if (text == "MOVE HERE") 76 else if (text == "SHARE" || text == "TRASH") 56 else 48)
+        params.width = dp(
+            when (text) {
+                "EXTRACT ALL" -> 72
+                "EXTRACT HERE" -> 76
+                "EXTRACT TO" -> 68
+                "MOVE HERE" -> 74
+                "SHARE", "TRASH" -> 56
+                else -> 48
+            }
+        )
         parent.addView(button, params)
     }
 
@@ -537,7 +585,7 @@ open class MainActivity : Activity() {
         row.gravity = Gravity.CENTER_VERTICAL
         row.setPadding(dp(8), dp(3), dp(8), dp(3))
         row.background = toolbarDrawable()
-        addToolbarIconButton(row, R.drawable.ic_fm_parent) { rightPane.directory.parentFile?.let { showDirectoryContents(it) } }
+        addToolbarIconButton(row, R.drawable.ic_fm_parent) { goParent() }
         addToolbarIconButton(row, R.drawable.ic_fm_home) { showHome() }
         addToolbarIconButton(row, R.drawable.ic_fm_folder_plus) { promptMkdir() }
         addToolbarIconButton(row, R.drawable.ic_fm_refresh) { reloadAll() }
@@ -599,7 +647,7 @@ open class MainActivity : Activity() {
                 clampCursor(rightPane)
                 val entry = rightPane.rows.getOrNull(position)
                 if (shareSelectionMode || selectedPaths.isNotEmpty()) {
-                    entry?.file?.let(::toggleSelection)
+                    entry?.let(::toggleSelection)
                 } else {
                     showRightCursorHighlight = true
                     openSelected()
@@ -609,7 +657,7 @@ open class MainActivity : Activity() {
                 activePanel = Panel.RIGHT
                 rightPane.cursor = position
                 showRightCursorHighlight = false
-                rightPane.rows.getOrNull(position)?.takeUnless { it.isParent }?.file?.let(::toggleSelection)
+                rightPane.rows.getOrNull(position)?.takeUnless { it.isParent }?.let(::toggleSelection)
                 true
             }
             pane.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -912,6 +960,10 @@ open class MainActivity : Activity() {
     }
 
     private fun reloadAll() {
+        activeArchive?.let {
+            openArchive(it, archiveDirectory)
+            return
+        }
         clearVirtualCategory()
         if (currentScreen == Screen.HOME) {
             showHome()
@@ -1254,7 +1306,7 @@ open class MainActivity : Activity() {
     }
 
     private fun bindGridCell(cell: LinearLayout, entry: FileEntry, index: Int) {
-        val selected = entry.file?.absolutePath in selectedPaths ||
+        val selected = (entry.archivePath ?: entry.file?.absolutePath) in selectedPaths ||
             selectedPaths.isEmpty() && pendingCopyPaths.isEmpty() && pendingMovePaths.isEmpty() && showRightCursorHighlight &&
             activePanel == Panel.RIGHT && index == rightPane.cursor
         val color = rowTextColor(selected, entry.isDirectory)
@@ -1284,13 +1336,13 @@ open class MainActivity : Activity() {
             activePanel = panel
             pane(panel).cursor = index
             clampCursor(pane(panel))
-            if (panel == Panel.RIGHT && (shareSelectionMode || selectedPaths.isNotEmpty())) entry.file?.let(::toggleSelection) else openSelected()
+            if (panel == Panel.RIGHT && (shareSelectionMode || selectedPaths.isNotEmpty())) toggleSelection(entry) else openSelected()
         }
         row.setOnLongClickListener {
             activePanel = panel
             pane(panel).cursor = index
             entry.file?.let {
-                if (panel == Panel.RIGHT && !entry.isParent) toggleSelection(it)
+                if (panel == Panel.RIGHT && !entry.isParent) toggleSelection(entry)
                 else if (!entry.isParent) showItemMenu(it)
             }
             true
@@ -1394,6 +1446,12 @@ open class MainActivity : Activity() {
         val entry = activePane().rows.getOrNull(activePane().cursor) ?: return
         if (entry.isSection) return
         if (entry.isTrashPlace) return showTrashContents()
+        if (activeArchive != null && activePanel == Panel.RIGHT) {
+            val path = entry.archivePath ?: return
+            if (entry.isDirectory) showArchiveDirectory(path)
+            else showOutput("ARCHIVE", "$path\n\n${humanSize(entry.size)}")
+            return
+        }
         val file = entry.file ?: return
         if (activePanel == Panel.LEFT) {
             if (entry.isParent) navigateMain(file) else if (entry.isDirectory) showDirectoryContents(file)
@@ -1464,7 +1522,11 @@ open class MainActivity : Activity() {
     }
 
     private fun goParent() {
-        rightPane.directory.parentFile?.let { showDirectoryContents(it) }
+        if (activeArchive != null) {
+            if (archiveDirectory.isNotEmpty()) showArchiveDirectory(ArchiveExtractor.parent(archiveDirectory)) else closeArchive()
+        } else {
+            rightPane.directory.parentFile?.let { showDirectoryContents(it) }
+        }
     }
 
     private fun switchPanel(panel: Panel) {
@@ -1475,8 +1537,124 @@ open class MainActivity : Activity() {
 
     private fun clearVirtualCategory() {
         categoryLoadVersion++
+        archiveLoadVersion++
         rightVirtualTitle = null
         activeCategory = null
+        activeArchive = null
+        archiveEntries = emptyList()
+        archiveDirectory = ""
+    }
+
+    private fun openArchive(archive: File, directory: String = "") {
+        val loadVersion = ++archiveLoadVersion
+        Toast.makeText(this, "Opening ${archive.name}", Toast.LENGTH_SHORT).show()
+        Thread {
+            val result = runCatching { ArchiveExtractor.entries(archive) }
+            runOnUiThread {
+                if (loadVersion != archiveLoadVersion) return@runOnUiThread
+                result.fold(
+                    onSuccess = { entries ->
+                        if (currentScreen != Screen.TREE) showTree(archive.parentFile ?: homeDirectory())
+                        activeArchive = archive
+                        archiveEntries = entries
+                        archiveDirectory = directory
+                        pendingArchiveExtraction = null
+                        selectedPaths.clear()
+                        pendingCopyPaths.clear()
+                        pendingMovePaths.clear()
+                        showArchiveDirectory(directory)
+                    },
+                    onFailure = { showOutput("ARCHIVE", "Could not open ${archive.name}:\n${it.message}") }
+                )
+            }
+        }.start()
+    }
+
+    private fun showArchiveDirectory(directory: String) {
+        val archive = activeArchive ?: return
+        archiveDirectory = directory
+        val children = ArchiveExtractor.children(archiveEntries, directory)
+        rightVirtualTitle = archive.name + "!/" + directory
+        activeCategory = null
+        rightPane.directory = archive.parentFile ?: homeDirectory()
+        rightPane.rows.clear()
+        if (directory.isNotEmpty()) {
+            rightPane.rows += FileEntry(null, "..", true, isParent = true, archivePath = ArchiveExtractor.parent(directory))
+        }
+        rightPane.rows += children.take(MAX_ROWS).map {
+            FileEntry(null, it.path.substringAfterLast('/'), it.isDirectory, archivePath = it.path, size = it.size)
+        }
+        if (rightPane.rows.isEmpty()) rightPane.rows += FileEntry(null, "Archive is empty", false)
+        rightPane.cursor = 0
+        rightPane.summary = summarizeRows(rightPane.rows)
+        activePanel = Panel.RIGHT
+        showRightCursorHighlight = true
+        renderPane(Panel.LEFT)
+        renderPane(Panel.RIGHT)
+        addressPathView?.text = rightVirtualTitle
+        updateSelectionBar()
+    }
+
+    private fun closeArchive() {
+        val parent = activeArchive?.parentFile ?: homeDirectory()
+        selectedPaths.clear()
+        clearVirtualCategory()
+        showDirectoryContents(parent)
+    }
+
+    private fun clearArchiveSelection() {
+        selectedPaths.clear()
+        showRightCursorHighlight = false
+        updateSelectionBar()
+        refreshSelectionHighlights()
+    }
+
+    private fun extractArchiveNamed() {
+        val archive = activeArchive ?: return
+        runArchiveExtraction(archive, selectedPaths.toSet(), null, named = true)
+    }
+
+    private fun extractArchiveHere() {
+        val archive = activeArchive ?: return
+        runArchiveExtraction(archive, selectedPaths.toSet(), archive.parentFile ?: homeDirectory(), named = false)
+    }
+
+    private fun prepareArchiveExtractTo() {
+        val archive = activeArchive ?: return
+        pendingArchiveExtraction = PendingArchiveExtraction(archive, selectedPaths.toSet())
+        selectedPaths.clear()
+        clearVirtualCategory()
+        showDirectoryContents(archive.parentFile ?: homeDirectory())
+        updateSelectionBar()
+        Toast.makeText(this, "Navigate to a folder and tap EXTRACT HERE", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun confirmArchiveExtractHere() {
+        val request = pendingArchiveExtraction ?: return
+        runArchiveExtraction(request.archive, request.selected, rightPane.directory, named = false)
+    }
+
+    private fun cancelArchiveExtraction() {
+        pendingArchiveExtraction = null
+        updateSelectionBar()
+    }
+
+    private fun runArchiveExtraction(archive: File, selected: Set<String>, destination: File?, named: Boolean) {
+        Thread {
+            val result = runCatching {
+                if (named) ArchiveExtractor.extractNamed(archive, selected).let { "Extracted to ${it.absolutePath}" }
+                else ArchiveExtractor.extractTo(archive, destination ?: error("Missing destination"), selected)
+                    .let { "Extracted to ${destination.absolutePath}" }
+            }
+            runOnUiThread {
+                selectedPaths.clear()
+                pendingArchiveExtraction = null
+                updateSelectionBar()
+                refreshSelectionHighlights()
+                if (activeArchive == null) reloadAll()
+                showOutput("EXTRACT", result.fold({ it }, { "Could not extract ${archive.name}:\n${it.message}" }))
+            }
+        }.start()
     }
 
     private fun previewFile(file: File, contentUri: Uri? = null) {
@@ -1487,6 +1665,10 @@ open class MainActivity : Activity() {
         if (file.isDirectory) {
             val children = file.listFiles()
             showOutput("PREVIEW", "${file.absolutePath}\n\n${children?.size ?: 0} children")
+            return
+        }
+        if (ArchiveExtractor.supports(file)) {
+            openArchive(file)
             return
         }
         if (!isLikelyText(file)) {
@@ -1582,6 +1764,19 @@ open class MainActivity : Activity() {
         if (!selectedPaths.add(file.absolutePath)) selectedPaths.remove(file.absolutePath)
         updateSelectionBar()
         refreshSelectionHighlights()
+    }
+
+    private fun toggleSelection(entry: FileEntry) {
+        if (entry.isParent || entry.isSection) return
+        val archivePath = entry.archivePath
+        if (activeArchive != null && archivePath != null) {
+            showRightCursorHighlight = false
+            if (!selectedPaths.add(archivePath)) selectedPaths.remove(archivePath)
+            updateSelectionBar()
+            refreshSelectionHighlights()
+            return
+        }
+        entry.file?.let(::toggleSelection)
     }
 
     private fun refreshSelectionHighlights() {
@@ -2751,7 +2946,7 @@ open class MainActivity : Activity() {
     }
 
     private fun rowSelected(entry: FileEntry, panel: Panel, index: Int): Boolean {
-        if (entry.file?.absolutePath in selectedPaths) return true
+        if ((entry.archivePath ?: entry.file?.absolutePath) in selectedPaths) return true
         if (panel == Panel.LEFT && activePanel != Panel.LEFT) {
             return entry.file?.absolutePath == rightPane.directory.absolutePath
         }
@@ -2771,11 +2966,11 @@ open class MainActivity : Activity() {
     }
 
     private fun summarizeRows(rows: List<FileEntry>, includeSize: Boolean = true): String {
-        val entries = rows.filter { !it.isParent && !it.isSection && it.file != null }
+        val entries = rows.filter { !it.isParent && !it.isSection && (it.file != null || it.archivePath != null) }
         val dirs = entries.count { it.isDirectory }
         val files = entries.size - dirs
         if (!includeSize) return "$dirs dirs | $files files"
-        val size = entries.filterNot { it.isDirectory }.sumOf { it.file?.length() ?: 0L }
+        val size = entries.filterNot { it.isDirectory }.sumOf { it.file?.length() ?: it.size }
         return "$dirs dirs | $files files: ${humanSize(size)}"
     }
 
@@ -2808,7 +3003,7 @@ open class MainActivity : Activity() {
         if (entry.isParent) return "↑"
         if (entry.isTrashPlace) return ""
         if (entry.isDirectory) return directoryGlyph(entry.file?.name ?: entry.label, selected)
-        val ext = entry.file?.name?.lowercase(Locale.US)?.substringAfterLast('.', "") ?: ""
+        val ext = (entry.file?.name ?: entry.label).lowercase(Locale.US).substringAfterLast('.', "")
         return when (ext) {
             "md", "markdown" -> ""
             "txt", "log", "csv", "yaml", "yml", "toml", "ini", "conf", "ignore", "gitignore" -> ""
