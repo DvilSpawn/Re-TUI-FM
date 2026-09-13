@@ -37,8 +37,8 @@ android {
         applicationId "com.dvil.retui.fm"
         minSdk 26
         targetSdk 36
-        versionCode 17
-        versionName "0.1.16"
+        versionCode 18
+        versionName "0.1.17"
     }
 
     buildTypes {
@@ -49,6 +49,16 @@ android {
             if (hasReleaseSigning) {
                 signingConfig signingConfigs.release
             }
+        }
+    }
+
+    productFlavors {
+        flavorDimensions = ["distribution"]
+        github {
+            dimension = "distribution"
+        }
+        playstore {
+            dimension = "distribution"
         }
     }
 

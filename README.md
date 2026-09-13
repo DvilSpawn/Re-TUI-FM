@@ -49,7 +49,7 @@ Re:TUI-FM is designed for local file navigation and requests broad storage acces
 
 - `MANAGE_EXTERNAL_STORAGE`
 - legacy `READ_EXTERNAL_STORAGE` on older Android versions
-- Android 13+ media read permissions for images, video, and audio
+- `REQUEST_INSTALL_PACKAGES` so a user can open a local APK and hand it to an installer they choose
 
 The `permission` command opens the relevant Android storage access settings.
 
@@ -60,16 +60,16 @@ Requirements:
 - Android Studio or Android SDK command-line tools
 - JDK compatible with the Android Gradle Plugin
 
-Build a debug APK:
+Build the free GitHub APK:
 
 ```bash
-./gradlew assembleDebug
+./gradlew assembleGithubRelease
 ```
 
-Build a release APK:
+Build the paid Google Play bundle:
 
 ```bash
-./gradlew assembleRelease
+./gradlew bundlePlaystoreRelease
 ```
 
 Release signing is optional and is read from `local.properties` when present:
@@ -83,9 +83,18 @@ keyPassword=...
 
 Keystores and `local.properties` are ignored by git.
 
-## Releases
+## Distribution
 
-GitHub releases publish a signed APK for sideload testing when local signing credentials are available. The app is currently versioned independently from the main Re:T-UI launcher.
+- **GitHub:** free signed APK at `app/build/outputs/apk/github/release/app-github-release.apk`.
+- **Google Play:** paid app bundle at `app/build/outputs/bundle/playstoreRelease/app-playstore-release.aab`.
+
+Both builds contain the same file-manager features. Price, licensing, and availability are managed by Google Play, not by a code-level feature lock. Never attach the Play Store `.aab` to a GitHub release.
+
+The GitHub APK is signed locally. The Play AAB is signed with the upload key, then Google Play App Signing signs the APKs delivered to customers. Because the installed certificates differ, users cannot switch between GitHub and Play builds with an in-place update; they must uninstall one channel before installing the other.
+
+The pinned channel fingerprints and release signing procedure are recorded in [`docs/GOOGLE_PLAY.md`](docs/GOOGLE_PLAY.md). GitHub releases keep the existing local release signature; Google Play customer installs use the Play app-signing certificate.
+
+Play Console declarations and privacy copy are maintained in [`docs/GOOGLE_PLAY.md`](docs/GOOGLE_PLAY.md) and [`docs/privacy.html`](docs/privacy.html).
 
 ## Repository Status
 
