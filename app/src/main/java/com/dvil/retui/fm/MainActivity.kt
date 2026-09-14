@@ -3,7 +3,6 @@ package com.dvil.retui.fm
 import android.Manifest
 import com.dvil.retui.contract.RetuiVisualContract
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ContentUris
@@ -65,7 +64,7 @@ import kotlin.math.roundToInt
 open class MainActivity : Activity() {
     private enum class Panel { LEFT, RIGHT }
     private enum class Screen { HOME, TREE }
-    private enum class SortMode { NAME_ASC, NAME_DESC, MODIFIED_NEWEST, MODIFIED_OLDEST }
+    private enum class SortMode { NAME_ASC, NAME_DESC, MODIFIED_NEWEST, MODIFIED_OLDEST, SIZE_LARGEST, SIZE_SMALLEST, TYPE }
 
     private data class FileEntry(
         val file: File?,
@@ -112,6 +111,9 @@ open class MainActivity : Activity() {
     private var rightGridAdapter: BaseAdapter? = null
     private var rightNameSortView: ImageView? = null
     private var rightModifiedSortView: ImageView? = null
+    private var rightWorkspace: FrameLayout? = null
+    @Volatile private var paneDialog: PaneDialog? = null
+    private var showHidden = false
     private var contentHost: FrameLayout? = null
     private var leftFooterView: TextView? = null
     private var rightFooterView: TextView? = null
@@ -213,6 +215,7 @@ open class MainActivity : Activity() {
         val start = resolveStartDirectory(intent)
         leftPane = PaneState(start)
         rightPane = PaneState(start)
+        showHidden = themePrefs().getBoolean("show_hidden", false)
         setContentView(buildUi())
         if (floatingWindow) rootView?.post(::applyFloatingWindowBounds)
         rootView?.requestFocus()
@@ -275,6 +278,7 @@ open class MainActivity : Activity() {
     }
 
     override fun onBackPressed() {
+        paneDialog?.let { it.dismiss(); return }
         if (selectedPaths.isNotEmpty() || shareSelectionMode) {
             closeShareSelection()
             return
@@ -481,7 +485,10 @@ open class MainActivity : Activity() {
         val rightParams = LinearLayout.LayoutParams(0, -1, 0.62f)
         rightParams.leftMargin = dp(4)
         panes.addView(buildPane(Panel.LEFT), leftParams)
-        panes.addView(buildPane(Panel.RIGHT), rightParams)
+        rightWorkspace = FrameLayout(this).also { host ->
+            host.addView(buildPane(Panel.RIGHT), FrameLayout.LayoutParams(-1, -1))
+            panes.addView(host, rightParams)
+        }
         return panes
     }
 
@@ -694,6 +701,15 @@ open class MainActivity : Activity() {
             rightSortMode = if (rightSortMode == SortMode.MODIFIED_NEWEST) SortMode.MODIFIED_OLDEST else SortMode.MODIFIED_NEWEST
             sortRightPane()
         }
+        addSortButton(bar, android.R.drawable.ic_menu_sort_by_size, "More sorting options") {
+            showActionMenu("Sort", listOf(
+                "Name A–Z" to { rightSortMode = SortMode.NAME_ASC; sortRightPane() },
+                "Newest first" to { rightSortMode = SortMode.MODIFIED_NEWEST; sortRightPane() },
+                "Largest first" to { rightSortMode = SortMode.SIZE_LARGEST; sortRightPane() },
+                "Smallest first" to { rightSortMode = SortMode.SIZE_SMALLEST; sortRightPane() },
+                "File type" to { rightSortMode = SortMode.TYPE; sortRightPane() }
+            ))
+        }
         updateSortButtons()
         return bar
     }
@@ -739,6 +755,7 @@ open class MainActivity : Activity() {
     }
 
     private fun showHome() {
+        paneDialog = null
         selectedPaths.clear()
         clearVirtualCategory()
         currentScreen = Screen.HOME
@@ -872,7 +889,7 @@ open class MainActivity : Activity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (handleHardwareKey(event.keyCode, event)) return true
+        if (paneDialog == null && handleHardwareKey(event.keyCode, event)) return true
         return super.dispatchKeyEvent(event)
     }
 
@@ -980,7 +997,7 @@ open class MainActivity : Activity() {
         if (pane !== leftPane) {
             pane.rows.add(FileEntry(dir.parentFile, "/..", true, true))
         }
-        val files = dir.listFiles()?.toList().orEmpty()
+        val files = dir.listFiles()?.filter { showHidden || !it.name.startsWith(".") }.orEmpty()
         val sorted = if (pane === rightPane) sortedFiles(files) else files.sortedWith(
             compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase(Locale.US) }
         )
@@ -1100,6 +1117,9 @@ open class MainActivity : Activity() {
                 SortMode.NAME_DESC -> b.name.compareTo(a.name, ignoreCase = true)
                 SortMode.MODIFIED_NEWEST -> compareValues(b.lastModified(), a.lastModified()).takeIf { it != 0 }
                     ?: a.name.compareTo(b.name, ignoreCase = true)
+                SortMode.SIZE_LARGEST -> compareValues(b.length(), a.length()).takeIf { it != 0 } ?: a.name.compareTo(b.name, true)
+                SortMode.SIZE_SMALLEST -> compareValues(a.length(), b.length()).takeIf { it != 0 } ?: a.name.compareTo(b.name, true)
+                SortMode.TYPE -> a.extension.compareTo(b.extension, true).takeIf { it != 0 } ?: a.name.compareTo(b.name, true)
                 SortMode.MODIFIED_OLDEST -> compareValues(a.lastModified(), b.lastModified()).takeIf { it != 0 }
                     ?: a.name.compareTo(b.name, ignoreCase = true)
             }
@@ -1467,6 +1487,7 @@ open class MainActivity : Activity() {
     }
 
     private fun showDirectoryContents(dir: File) {
+        paneDialog?.dismiss()
         if (!dir.exists() || !dir.isDirectory) {
             showOutput("CD", "Not a directory: ${dir.absolutePath}")
             return
@@ -1490,6 +1511,7 @@ open class MainActivity : Activity() {
     }
 
     private fun navigateMain(dir: File) {
+        paneDialog?.dismiss()
         if (!dir.exists() || !dir.isDirectory) {
             showOutput("CD", "Not a directory: ${dir.absolutePath}")
             return
@@ -1795,7 +1817,7 @@ open class MainActivity : Activity() {
         val files = selectedFiles().filter(::isInTrash)
         if (files.isEmpty()) return clearSelection()
         val panel = dialogPanel("Restore ${files.size} items to their source folders?")
-        lateinit var dialog: AlertDialog
+        lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
         addDialogButton(buttons, "RESTORE") {
@@ -1805,7 +1827,7 @@ open class MainActivity : Activity() {
             showTrashContents()
             showOutput("RESTORE", "$restored of ${files.size} items restored")
         }
-        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
         dialog = showDialogPanel(panel)
     }
 
@@ -1847,14 +1869,14 @@ open class MainActivity : Activity() {
         path.setTextColor(withAlpha(outputTextColor, 190))
         path.setPadding(dp(8), dp(8), dp(8), dp(8))
         panel.addView(path, LinearLayout.LayoutParams(-1, -2))
-        lateinit var dialog: AlertDialog
+        lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "NOT HERE") { dialog.dismiss() }
         addDialogButton(buttons, "PASTE") {
             dialog.dismiss()
             runBulkTransfer(files, destination, false)
         }
-        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
         dialog = showDialogPanel(panel)
     }
 
@@ -1882,14 +1904,14 @@ open class MainActivity : Activity() {
         path.setTextColor(withAlpha(outputTextColor, 190))
         path.setPadding(dp(8), dp(8), dp(8), dp(8))
         panel.addView(path, LinearLayout.LayoutParams(-1, -2))
-        lateinit var dialog: AlertDialog
+        lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "NOT HERE") { dialog.dismiss() }
         addDialogButton(buttons, "MOVE HERE") {
             dialog.dismiss()
             runBulkTransfer(files, destination, true)
         }
-        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
         dialog = showDialogPanel(panel)
     }
 
@@ -1936,7 +1958,7 @@ open class MainActivity : Activity() {
         val files = selectedFiles()
         if (files.isEmpty()) return clearSelection()
         val panel = dialogPanel("Move ${files.size} items to trash?")
-        lateinit var dialog: AlertDialog
+        lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
         addDialogButton(buttons, "TRASH") {
@@ -1949,7 +1971,7 @@ open class MainActivity : Activity() {
             updateSelectionBar()
             showOutput("TRASH", "$moved of ${files.size} items moved to trash")
         }
-        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
         dialog = showDialogPanel(panel)
     }
 
@@ -1982,8 +2004,8 @@ open class MainActivity : Activity() {
         input.setTextSize(scaledFontSp(inputFontSizeSp, fontScaleOffsetSp))
         input.background = addressDrawable()
         input.setPadding(dp(8), 0, dp(8), 0)
-        panel.addView(input, LinearLayout.LayoutParams(-1, dp(44)))
-        lateinit var dialog: AlertDialog
+        panel.addView(input, LinearLayout.LayoutParams(-1, dp(48)))
+        lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
         addDialogButton(buttons, "CREATE") {
@@ -2001,7 +2023,7 @@ open class MainActivity : Activity() {
             dialog.dismiss()
             createZip(files, target)
         }
-        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
         dialog = showDialogPanel(panel, input)
     }
 
@@ -2054,7 +2076,7 @@ open class MainActivity : Activity() {
         path.setPadding(dp(8), dp(8), dp(8), dp(8))
         panel.addView(path, LinearLayout.LayoutParams(-1, -2))
 
-        lateinit var dialog: AlertDialog
+        lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
         addDialogButton(buttons, "TRASH") {
@@ -2063,7 +2085,7 @@ open class MainActivity : Activity() {
             reloadAll()
             showOutput("TRASH", if (ok) "Moved to .retui-trash:\n${file.absolutePath}" else "Could not trash ${file.absolutePath}")
         }
-        val buttonParams = LinearLayout.LayoutParams(-1, dp(44))
+        val buttonParams = LinearLayout.LayoutParams(-1, dp(48))
         buttonParams.topMargin = dp(10)
         panel.addView(buttons, buttonParams)
         dialog = showDialogPanel(panel)
@@ -2076,7 +2098,7 @@ open class MainActivity : Activity() {
         warning.setTextColor(outputTextColor)
         warning.setPadding(dp(8), dp(8), dp(8), dp(8))
         panel.addView(warning, LinearLayout.LayoutParams(-1, -2))
-        lateinit var dialog: AlertDialog
+        lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
         addDialogButton(buttons, "DELETE") {
@@ -2085,7 +2107,7 @@ open class MainActivity : Activity() {
             if (rightVirtualTitle == "TRASH") showTrashContents() else reloadAll()
             showOutput("DELETE", if (deleted) "Permanently deleted ${file.name}" else "Could not delete ${file.name}")
         }
-        val buttonParams = LinearLayout.LayoutParams(-1, dp(44))
+        val buttonParams = LinearLayout.LayoutParams(-1, dp(48))
         buttonParams.topMargin = dp(10)
         panel.addView(buttons, buttonParams)
         dialog = showDialogPanel(panel)
@@ -2097,8 +2119,8 @@ open class MainActivity : Activity() {
         val panel = dialogPanel("Delete ${files.size} items permanently?")
         val warning = label("This cannot be undone.", max(10, outputTextSizeSp - 2), false)
         warning.gravity = Gravity.CENTER
-        panel.addView(warning, LinearLayout.LayoutParams(-1, dp(44)))
-        lateinit var dialog: AlertDialog
+        panel.addView(warning, LinearLayout.LayoutParams(-1, dp(48)))
+        lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
         addDialogButton(buttons, "DELETE") {
@@ -2108,7 +2130,7 @@ open class MainActivity : Activity() {
             showTrashContents()
             showOutput("DELETE", "$deleted of ${files.size} items permanently deleted")
         }
-        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(46)))
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
         dialog = showDialogPanel(panel)
     }
 
@@ -2141,6 +2163,12 @@ open class MainActivity : Activity() {
                 actions.add { addPlace(file) }
             }
         }
+        labels.add("Properties")
+        actions.add { showProperties(file) }
+        if (!isUnderTrash(file) && file.parentFile != null) {
+            labels.add("Rename")
+            actions.add { promptRename(file) }
+        }
         if (isInTrash(file)) {
             labels.add("Restore")
             actions.add { restoreFromTrash(file) }
@@ -2151,6 +2179,78 @@ open class MainActivity : Activity() {
             actions.add { confirmDelete(file) }
         }
         showActionMenu(file.name, labels.zip(actions))
+    }
+
+    private fun selectVisible(invert: Boolean) {
+        val paths = rightPane.rows.filter { !it.isParent && !it.isSection && it.file?.name != TRASH_DIR_NAME && (!shareSelectionMode || !it.isDirectory) }
+            .mapNotNull { it.archivePath ?: it.file?.absolutePath }
+        pendingCopyPaths.clear()
+        pendingMovePaths.clear()
+        val selected = if (invert) paths.filterNot { it in selectedPaths } else paths
+        selectedPaths.clear()
+        selectedPaths.addAll(selected)
+        updateSelectionBar()
+        refreshSelectionHighlights()
+    }
+
+    private fun promptRename(file: File) {
+        if (isUnderTrash(file)) return showOutput("RENAME", "Restore this item before renaming it.")
+        val panel = dialogPanel("Rename")
+        val input = EditText(this).apply {
+            setSingleLine(true)
+            typeface = appTypeface
+            setText(file.name)
+            selectAll()
+        }
+        panel.addView(input, LinearLayout.LayoutParams(-1, dp(48)))
+        val errorMessage = label("", outputTextSizeSp, false).apply { setSingleLine(false) }
+        panel.addView(errorMessage)
+        lateinit var dialog: PaneDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
+        addDialogButton(buttons, "RENAME") {
+            try {
+                val target = renameFile(file, input.text.toString())
+                if (selectedPaths.remove(file.absolutePath)) selectedPaths.add(target.absolutePath)
+                dialog.dismiss()
+                reloadAll()
+            } catch (e: Exception) {
+                errorMessage.text = e.message ?: "Could not rename item"
+            }
+        }
+        panel.addView(buttons)
+        dialog = showDialogPanel(panel, input)
+    }
+
+    private fun showProperties(file: File) {
+        val panel = dialogPanel("Properties")
+        val body = label("Calculating…", outputTextSizeSp, false).apply { setSingleLine(false); setTextIsSelectable(true) }
+        panel.addView(body, LinearLayout.LayoutParams(-1, -2))
+        lateinit var dialog: PaneDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "BACK") { dialog.dismiss() }
+        panel.addView(buttons)
+        dialog = showDialogPanel(panel)
+        val details = "Name: ${file.name}\nPath: ${file.absolutePath}\nType: ${if (file.isDirectory) "Folder" else mimeFor(file)}\nModified: ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(file.lastModified()))}"
+        body.text = "$details\nCalculating size…"
+        Thread {
+            val result = runCatching {
+                var bytes = 0L
+                var count = 0L
+                java.nio.file.Files.walk(file.toPath()).use { paths ->
+                    val iterator = paths.iterator()
+                    while (iterator.hasNext() && paneDialog === dialog) {
+                        val path = iterator.next()
+                        if (path != file.toPath()) count++
+                        if (java.nio.file.Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) bytes += java.nio.file.Files.size(path)
+                    }
+                }
+                "$details\nSize: ${humanSize(bytes)} ($bytes bytes)" + if (file.isDirectory) "\nContained items: $count" else ""
+            }
+            runOnUiThread {
+                if (paneDialog === dialog) body.text = result.getOrElse { "$details\nSize unavailable: ${it.message}" }
+            }
+        }.start()
     }
 
     private fun customPlacePaths(): List<String> {
@@ -2193,11 +2293,11 @@ open class MainActivity : Activity() {
         input.setPadding(dp(8), 0, dp(8), 0)
         input.background = addressDrawable()
         input.hint = "Folder name"
-        val inputParams = LinearLayout.LayoutParams(-1, dp(44))
+        val inputParams = LinearLayout.LayoutParams(-1, dp(48))
         inputParams.topMargin = dp(8)
         panel.addView(input, inputParams)
 
-        lateinit var dialog: AlertDialog
+        lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
         addDialogButton(buttons, "CREATE") {
@@ -2213,7 +2313,7 @@ open class MainActivity : Activity() {
                 }
             }
         }
-        val buttonParams = LinearLayout.LayoutParams(-1, dp(44))
+        val buttonParams = LinearLayout.LayoutParams(-1, dp(48))
         buttonParams.topMargin = dp(10)
         panel.addView(buttons, buttonParams)
         dialog = showDialogPanel(panel, input)
@@ -2238,11 +2338,11 @@ open class MainActivity : Activity() {
         input.setPadding(dp(8), 0, dp(8), 0)
         input.background = addressDrawable()
         input.hint = "Name contains..."
-        val inputParams = LinearLayout.LayoutParams(-1, dp(44))
+        val inputParams = LinearLayout.LayoutParams(-1, dp(48))
         inputParams.topMargin = dp(8)
         panel.addView(input, inputParams)
 
-        lateinit var dialog: AlertDialog
+        lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
         addDialogButton(buttons, "SEARCH") {
@@ -2251,7 +2351,7 @@ open class MainActivity : Activity() {
             if (query.isNotEmpty()) runFind(searchRequestFromText(query), root)
         }
 
-        val buttonParams = LinearLayout.LayoutParams(-1, dp(44))
+        val buttonParams = LinearLayout.LayoutParams(-1, dp(48))
         buttonParams.topMargin = dp(10)
         panel.addView(buttons, buttonParams)
         dialog = showDialogPanel(panel, input)
@@ -2268,7 +2368,8 @@ open class MainActivity : Activity() {
         Toast.makeText(this, "Searching...", Toast.LENGTH_SHORT).show()
         Thread {
             val out = ArrayList<FileEntry>()
-            root.walkTopDown().onFail { _, _ -> }.forEach { file ->
+            root.walkTopDown().onEnter { showHidden || it == root || !it.name.startsWith(".") }.onFail { _, _ -> }.forEach { file ->
+                if (!showHidden && file.name.startsWith(".")) return@forEach
                 if (out.size >= MAX_ROWS) return@forEach
                 if (matchesSearch(file, request)) {
                     out.add(FileEntry(file, file.name, file.isDirectory))
@@ -2515,14 +2616,49 @@ open class MainActivity : Activity() {
         return panel
     }
 
-    private fun showDialogPanel(panel: View, focus: View? = null): AlertDialog {
-        val dialog = AlertDialog.Builder(this).create()
-        dialog.setView(panel)
-        dialog.show()
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        if (focus != null) {
-            dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
-            focus.post { focus.requestFocus() }
+    private inner class PaneDialog(val host: FrameLayout, val view: View, val returnHome: Boolean) {
+        fun dismiss() {
+            if (paneDialog !== this) return
+            (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                .hideSoftInputFromWindow(view.windowToken, 0)
+            host.removeView(view)
+            host.getChildAt(0)?.visibility = View.VISIBLE
+            paneDialog = null
+            if (returnHome) showHome()
+        }
+    }
+
+    private fun showDialogPanel(panel: View, focus: View? = null): PaneDialog {
+        paneDialog?.dismiss()
+        val returnHome = currentScreen == Screen.HOME
+        if (returnHome) showTree(rightPane.directory)
+        val host = requireNotNull(rightWorkspace)
+        val background = outputPanelColor or 0xff000000.toInt()
+        val foreground = outputTextColor or 0xff000000.toInt()
+        val readable = if (androidx.core.graphics.ColorUtils.calculateContrast(foreground, background) >= 4.5) foreground
+            else if (androidx.core.graphics.ColorUtils.calculateLuminance(background) > 0.179) Color.BLACK else Color.WHITE
+        fun style(view: View) {
+            if (view is TextView) {
+                view.setTextColor(readable)
+                view.setHintTextColor(readable)
+                if (view.isClickable || view is EditText) view.setBackgroundColor(background)
+            }
+            if (view is android.view.ViewGroup) for (i in 0 until view.childCount) style(view.getChildAt(i))
+        }
+        style(panel)
+        panel.setBackgroundColor(background)
+        val scroll = ScrollView(this)
+        scroll.isFillViewport = true
+        scroll.setBackgroundColor(background)
+        scroll.addView(panel, FrameLayout.LayoutParams(-1, -2))
+        host.getChildAt(0)?.visibility = View.GONE
+        host.addView(scroll, FrameLayout.LayoutParams(-1, -1))
+        val dialog = PaneDialog(host, scroll, returnHome)
+        paneDialog = dialog
+        if (focus != null) focus.post {
+            focus.requestFocus()
+            (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                .showSoftInput(focus, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
         }
         return dialog
     }
@@ -2540,8 +2676,8 @@ open class MainActivity : Activity() {
         button.setTextColor(moduleButtonTextColor)
         button.background = panelDrawable(PanelRole.MODULE, interactive = true)
         button.setOnClickListener { action() }
-        val params = LinearLayout.LayoutParams(dp(96), dp(38))
-        params.leftMargin = dp(8)
+        val params = LinearLayout.LayoutParams(0, dp(48), 1f)
+        params.leftMargin = dp(2)
         parent.addView(button, params)
     }
 
@@ -2557,10 +2693,10 @@ open class MainActivity : Activity() {
         scroll.addView(body, FrameLayout.LayoutParams(-1, -2))
         panel.addView(scroll, LinearLayout.LayoutParams(-1, dp(260)))
 
-        lateinit var dialog: AlertDialog
+        lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "OK") { dialog.dismiss() }
-        val buttonParams = LinearLayout.LayoutParams(-1, dp(44))
+        val buttonParams = LinearLayout.LayoutParams(-1, dp(48))
         buttonParams.topMargin = dp(8)
         panel.addView(buttons, buttonParams)
         dialog = showDialogPanel(panel)
@@ -2579,10 +2715,10 @@ open class MainActivity : Activity() {
         scroll.addView(body, FrameLayout.LayoutParams(-1, -2))
         panel.addView(scroll, LinearLayout.LayoutParams(-1, dp(430)))
 
-        lateinit var dialog: AlertDialog
+        lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "OK") { dialog.dismiss() }
-        val buttonParams = LinearLayout.LayoutParams(-1, dp(44))
+        val buttonParams = LinearLayout.LayoutParams(-1, dp(48))
         buttonParams.topMargin = dp(8)
         panel.addView(buttons, buttonParams)
         dialog = showDialogPanel(panel)
@@ -2816,6 +2952,10 @@ open class MainActivity : Activity() {
         showActionMenu(
             "Edit",
             listOf(
+                "Rename selected" to { withSelected("RENAME") { promptRename(it) } },
+                "Properties" to { withSelected("PROPERTIES") { showProperties(it) } },
+                "Select all" to { selectVisible(false) },
+                "Invert selection" to { selectVisible(true) },
                 "Edit selected text" to { withSelected("EDIT") { editFile(it) } },
                 "Move selected to trash" to { withSelected("TRASH") { confirmDelete(it) } }
             )
@@ -2826,6 +2966,12 @@ open class MainActivity : Activity() {
         showActionMenu(
             "View",
             listOf(
+                "Hidden files: ${if (showHidden) "shown" else "hidden"}" to {
+                    showHidden = !showHidden
+                    themePrefs().edit().putBoolean("show_hidden", showHidden).apply()
+                    selectedPaths.clear()
+                    reloadAll()
+                },
                 "Preview selected" to { withSelected("PREVIEW") { previewFile(it) } },
                 "Search current folder" to { promptSearch(contentPane().directory, "Search current folder") },
                 "Show right-pane path" to { showOutput("PWD", rightPane.directory.absolutePath) },
@@ -2864,7 +3010,7 @@ open class MainActivity : Activity() {
         }
         val panel = dialogPanel(title)
 
-        lateinit var dialog: AlertDialog
+        lateinit var dialog: PaneDialog
         for ((text, action) in items) {
             val row = label(text, outputTextSizeSp, true)
             row.gravity = Gravity.CENTER_VERTICAL or Gravity.START
@@ -2875,11 +3021,14 @@ open class MainActivity : Activity() {
                 dialog.dismiss()
                 action()
             }
-            val params = LinearLayout.LayoutParams(-1, dp(40))
+            val params = LinearLayout.LayoutParams(-1, dp(48))
             params.topMargin = dp(4)
             panel.addView(row, params)
         }
 
+        val close = dialogButtonRow()
+        addDialogButton(close, "BACK") { dialog.dismiss() }
+        panel.addView(close)
         dialog = showDialogPanel(panel)
     }
 

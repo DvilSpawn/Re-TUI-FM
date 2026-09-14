@@ -17,7 +17,10 @@ Re:TUI-FM is a standalone Android file manager for Re:T-UI Launcher. It provides
 - Inline text editing for small text-like files.
 - Guarded trash flow through `.retui-trash` before destructive deletion.
 - Long-press multi-selection for batch trash, share, ZIP, copy, and move.
-- Favorites and recent-directory navigation.
+- Folder bookmarks through Places.
+- Rename files/folders with collision protection; file/folder properties and recursive size.
+- Select all/invert selection, name/date/size/type sorting, and a saved hidden-files toggle.
+- App-owned forms and menus stay inside the right pane with opaque, contrast-checked surfaces; Back restores the browser.
 - Re:T-UI visual handoff through launch extras for colors, fonts, margins, wallpaper, and CRT/cyberdeck styling.
 - IME, navigation bar, status bar, and display-cutout handling through AndroidX window insets.
 
