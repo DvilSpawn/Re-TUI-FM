@@ -80,3 +80,7 @@ Policy references checked:
 ## Android 8–10 compatibility — v0.1.19
 
 Version code 20 adds legacy read/write permissions capped at API 29 and enables `requestLegacyExternalStorage` for Android 10. Android 11+ continues to use All files access. Permission results refresh the browser; File > Storage access provides recovery after denial. Unit and final-manifest checks cover this configuration; Android 10 device behavior has not yet been verified.
+
+## Transfer reliability — v0.1.20
+
+Version code 21 adds right-pane progress, cancellation, collision choices, cleanup of partial copies, and a clear completed/skipped/failed summary for copy and move. Backgrounding the app does not cancel an in-progress transfer; process termination remains outside the app's control. Device testing should cover large transfers, low storage, collision choices, cancellation, and background/return behavior.

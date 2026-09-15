@@ -55,6 +55,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.math.max
@@ -135,6 +136,7 @@ open class MainActivity : Activity() {
     private var archiveDirectory = ""
     private var archiveLoadVersion = 0
     private var pendingArchiveExtraction: PendingArchiveExtraction? = null
+    private var activeTransferCancellation: AtomicBoolean? = null
     private var activeCategory: FileCategory? = null
     private var categoryLoadVersion = 0
     private var homeCountVersion = 0
@@ -279,6 +281,10 @@ open class MainActivity : Activity() {
     }
 
     override fun onBackPressed() {
+        activeTransferCancellation?.let {
+            it.set(true)
+            return
+        }
         paneDialog?.let { it.dismiss(); return }
         if (selectedPaths.isNotEmpty() || shareSelectionMode) {
             closeShareSelection()
@@ -1882,11 +1888,7 @@ open class MainActivity : Activity() {
         panel.addView(path, LinearLayout.LayoutParams(-1, -2))
         lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
-        addDialogButton(buttons, "NOT HERE") { dialog.dismiss() }
-        addDialogButton(buttons, "PASTE") {
-            dialog.dismiss()
-            runBulkTransfer(files, destination, false)
-        }
+        addTransferButtons(buttons, dialog = { dialog }, files, destination, false)
         panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
         dialog = showDialogPanel(panel)
     }
@@ -1917,50 +1919,79 @@ open class MainActivity : Activity() {
         panel.addView(path, LinearLayout.LayoutParams(-1, -2))
         lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
-        addDialogButton(buttons, "NOT HERE") { dialog.dismiss() }
-        addDialogButton(buttons, "MOVE HERE") {
-            dialog.dismiss()
-            runBulkTransfer(files, destination, true)
+        addTransferButtons(buttons, dialog = { dialog }, files, destination, true)
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
+        dialog = showDialogPanel(panel)
+    }
+
+    private fun addTransferButtons(
+        buttons: LinearLayout,
+        dialog: () -> PaneDialog,
+        files: List<File>,
+        destination: File,
+        move: Boolean
+    ) {
+        addDialogButton(buttons, "CANCEL") { dialog().dismiss() }
+        addDialogButton(buttons, if (move) "MOVE" else "COPY") {
+            dialog().dismiss()
+            if (files.any { File(destination, it.name).exists() }) {
+                promptTransferConflictChoice(files, destination, move)
+            } else {
+                runBulkTransfer(files, destination, move, ConflictChoice.KEEP_BOTH)
+            }
+        }
+    }
+
+    private fun promptTransferConflictChoice(files: List<File>, destination: File, move: Boolean) {
+        val panel = dialogPanel("If an item already exists")
+        val detail = label("Choose how to handle collisions in ${destination.absolutePath}", outputTextSizeSp, false)
+        detail.setSingleLine(false)
+        panel.addView(detail)
+        lateinit var dialog: PaneDialog
+        val buttons = dialogButtonRow()
+        for ((label, choice) in listOf("KEEP BOTH" to ConflictChoice.KEEP_BOTH, "REPLACE" to ConflictChoice.REPLACE, "SKIP" to ConflictChoice.SKIP)) {
+            addDialogButton(buttons, label) {
+                dialog.dismiss()
+                runBulkTransfer(files, destination, move, choice)
+            }
         }
         panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
         dialog = showDialogPanel(panel)
     }
 
-    private fun runBulkTransfer(files: List<File>, destination: File, move: Boolean) {
+    private fun runBulkTransfer(files: List<File>, destination: File, move: Boolean, choice: ConflictChoice) {
+        val cancelled = AtomicBoolean(false)
+        activeTransferCancellation = cancelled
+        val panel = dialogPanel(if (move) "Moving items" else "Copying items")
+        val status = label("Preparing…", outputTextSizeSp, false)
+        status.setSingleLine(false)
+        panel.addView(status, LinearLayout.LayoutParams(-1, -2))
+        lateinit var dialog: PaneDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { cancelled.set(true) }
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
+        dialog = showDialogPanel(panel)
         Thread {
-            var completed = 0
-            var failure: String? = null
-            for (source in files) {
-                try {
-                    val sourcePath = source.canonicalPath
-                    val destinationPath = destination.canonicalPath
-                    if (move && source.parentFile?.canonicalPath == destinationPath) {
-                        throw IllegalArgumentException("${source.name} is already in that folder")
-                    }
-                    if (source.isDirectory && destinationPath.startsWith("$sourcePath${File.separator}")) {
-                        throw IllegalArgumentException("Cannot place ${source.name} inside itself")
-                    }
-                    val target = uniqueFile(File(destination, source.name))
-                    if (move && !source.renameTo(target)) {
-                        copyRecursively(source, target)
-                        val deleted = if (source.isDirectory) source.deleteRecursively() else source.delete()
-                        if (!deleted) throw IllegalStateException("Could not remove ${source.name}")
-                    } else if (!move) {
-                        copyRecursively(source, target)
-                    }
-                    completed++
-                } catch (e: Exception) {
-                    failure = e.message ?: source.name
-                    break
-                }
+            val report = TransferEngine.transfer(files, destination, move, choice, cancelled::get) { progress ->
+                runOnUiThread { if (activeTransferCancellation === cancelled) status.text = "${progress.completed}/${progress.total} complete\n${progress.current}" }
             }
             runOnUiThread {
+                if (activeTransferCancellation !== cancelled) return@runOnUiThread
+                activeTransferCancellation = null
+                dialog.dismiss()
                 selectedPaths.clear()
                 pendingCopyPaths.clear()
                 pendingMovePaths.clear()
                 reloadAll()
                 updateSelectionBar()
-                showOutput(if (move) "MOVE" else "COPY", failure ?: "$completed items completed")
+                val issues = report.failures.take(3).joinToString("\n")
+                val summary = buildString {
+                    append("${report.completed} completed")
+                    if (report.skipped > 0) append(", ${report.skipped} skipped")
+                    if (report.cancelled) append(", cancelled")
+                    if (report.failures.isNotEmpty()) append("\n${report.failures.size} failed:\n$issues")
+                }
+                showOutput(if (move) "MOVE" else "COPY", summary)
             }
         }.start()
     }
@@ -2501,18 +2532,6 @@ open class MainActivity : Activity() {
         renderPane(Panel.LEFT)
         renderPane(Panel.RIGHT)
         addressPathView?.text = rightVirtualTitle
-    }
-
-    private fun copyRecursively(src: File, dst: File) {
-        if (src.isDirectory) {
-            if (!dst.exists() && !dst.mkdirs()) throw IllegalStateException("Could not create ${dst.absolutePath}")
-            src.listFiles()?.forEach { child -> copyRecursively(child, File(dst, child.name)) }
-        } else {
-            dst.parentFile?.mkdirs()
-            FileInputStream(src).use { input ->
-                FileOutputStream(dst).use { output -> input.copyTo(output) }
-            }
-        }
     }
 
     private fun moveToTrash(file: File): Boolean {
