@@ -76,3 +76,7 @@ Policy references checked:
 - [All files access](https://support.google.com/googleplay/android-developer/answer/10467955?hl=en)
 - [Package installation permission](https://support.google.com/googleplay/android-developer/answer/12085295?hl=en)
 - [16 KB page sizes](https://developer.android.com/guide/practices/page-sizes)
+
+## Android 8–10 compatibility — v0.1.19
+
+Version code 20 adds legacy read/write permissions capped at API 29 and enables `requestLegacyExternalStorage` for Android 10. Android 11+ continues to use All files access. Permission results refresh the browser; File > Storage access provides recovery after denial. Unit and final-manifest checks cover this configuration; Android 10 device behavior has not yet been verified.

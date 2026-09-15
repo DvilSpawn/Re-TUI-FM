@@ -219,10 +219,10 @@ open class MainActivity : Activity() {
         setContentView(buildUi())
         if (floatingWindow) rootView?.post(::applyFloatingWindowBounds)
         rootView?.requestFocus()
-        ensureStorageAccess()
         runTrashCleanup()
         if (shouldOpenTree(intent)) showTree(start) else showHome()
         handleIncomingRequest(intent)
+        ensureStorageAccess()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -261,7 +261,8 @@ open class MainActivity : Activity() {
         if (firstResume) {
             firstResume = false
         } else if (::leftPane.isInitialized) {
-            activeCategory?.let(::showCategoryFiles) ?: reloadAll()
+            if (currentScreen == Screen.HOME) showHome()
+            else activeCategory?.let(::showCategoryFiles) ?: reloadAll()
         }
     }
 
@@ -997,7 +998,8 @@ open class MainActivity : Activity() {
         if (pane !== leftPane) {
             pane.rows.add(FileEntry(dir.parentFile, "/..", true, true))
         }
-        val files = dir.listFiles()?.filter { showHidden || !it.name.startsWith(".") }.orEmpty()
+        val children = dir.listFiles()
+        val files = children?.filter { showHidden || !it.name.startsWith(".") }.orEmpty()
         val sorted = if (pane === rightPane) sortedFiles(files) else files.sortedWith(
             compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase(Locale.US) }
         )
@@ -1017,6 +1019,7 @@ open class MainActivity : Activity() {
         for (file in visible.take(MAX_ROWS)) {
             pane.rows.add(FileEntry(file, file.name, file.isDirectory))
         }
+        if (children == null) pane.rows.add(FileEntry(null, "Folder unavailable. Open File > Storage access.", false))
         pane.summary = summarizeRows(pane.rows)
         if (pane.cursor >= pane.rows.size) pane.cursor = max(0, pane.rows.size - 1)
         if (pane.cursor < 0) pane.cursor = 0
@@ -1488,12 +1491,16 @@ open class MainActivity : Activity() {
 
     private fun showDirectoryContents(dir: File) {
         paneDialog?.dismiss()
+        if (!hasStorageAccess()) {
+            showStorageProblem(dir)
+            return
+        }
         if (!dir.exists() || !dir.isDirectory) {
             showOutput("CD", "Not a directory: ${dir.absolutePath}")
             return
         }
         if (!dir.canRead()) {
-            showOutput("CD", "Cannot read: ${dir.absolutePath}")
+            showStorageProblem(dir)
             return
         }
         showRightCursorHighlight = true
@@ -1512,12 +1519,16 @@ open class MainActivity : Activity() {
 
     private fun navigateMain(dir: File) {
         paneDialog?.dismiss()
+        if (!hasStorageAccess()) {
+            showStorageProblem(dir)
+            return
+        }
         if (!dir.exists() || !dir.isDirectory) {
             showOutput("CD", "Not a directory: ${dir.absolutePath}")
             return
         }
         if (!dir.canRead()) {
-            showOutput("CD", "Cannot read: ${dir.absolutePath}")
+            showStorageProblem(dir)
             return
         }
         showRightCursorHighlight = true
@@ -2791,6 +2802,7 @@ open class MainActivity : Activity() {
         showActionMenu(
             "File",
             listOf(
+                "Storage access" to { ensureStorageAccess(userInitiated = true) },
                 "New folder here" to { promptMkdir() },
                 "Open selected with Android" to { withSelected("OPEN") { openFile(it) } },
                 "Share selected file" to { withSelected("SHARE") { shareFile(it) } },
@@ -3275,19 +3287,58 @@ open class MainActivity : Activity() {
         return FilesNavigationContract.startDirectory(intent?.getStringExtra(EXTRA_PATH), homeDirectory())
     }
 
-    private fun ensureStorageAccess() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+    private fun hasStorageAccess(): Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        Environment.isExternalStorageManager()
+    } else {
+        legacyStoragePermissions(Build.VERSION.SDK_INT).all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun showStorageProblem(dir: File) {
+        if (hasStorageAccess()) {
+            showOutput("Folder unavailable", "Cannot read ${dir.absolutePath}. Android may restrict this folder, or its storage may be disconnected.")
+        } else {
+            showActionMenu("Storage permission required", listOf(
+                "Grant storage access" to { ensureStorageAccess(userInitiated = true) }
+            ))
+        }
+    }
+
+    private fun ensureStorageAccess(userInitiated: Boolean = false) {
+        if (hasStorageAccess()) {
+            if (userInitiated) showOutput("Storage access", "Storage access is granted. Android still restricts protected folders.")
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
-            } catch (_: Exception) {
+            } catch (_: ActivityNotFoundException) {
                 startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
             }
             return
         }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), 7)
+        val missing = legacyStoragePermissions(Build.VERSION.SDK_INT).filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        val previouslyRequested = themePrefs().getBoolean("legacy_storage_requested", false)
+        if (previouslyRequested && missing.any { !shouldShowRequestPermissionRationale(it) }) {
+            if (userInitiated) startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+            return
+        }
+        themePrefs().edit().putBoolean("legacy_storage_requested", true).apply()
+        requestPermissions(missing.toTypedArray(), 7)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != 7) return
+        if (hasStorageAccess()) {
+            paneDialog?.dismiss()
+            if (currentScreen == Screen.HOME) showHome()
+            else activeCategory?.let(::showCategoryFiles) ?: reloadAll()
+        } else {
+            showStorageProblem(rightPane.directory)
         }
     }
 

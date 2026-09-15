@@ -51,10 +51,10 @@ Long-press a file or folder to begin selection, then tap more items to toggle th
 Re:TUI-FM is designed for local file navigation and requests broad storage access on Android where required:
 
 - `MANAGE_EXTERNAL_STORAGE`
-- legacy `READ_EXTERNAL_STORAGE` on older Android versions
+- `READ_EXTERNAL_STORAGE` and `WRITE_EXTERNAL_STORAGE` on Android 8–10, with legacy storage enabled on Android 10
 - `REQUEST_INSTALL_PACKAGES` so a user can open a local APK and hand it to an installer they choose
 
-The `permission` command opens the relevant Android storage access settings.
+Use **File > Storage access** to grant access or reopen Android settings after a permanent denial. Android 11+ still restricts protected folders even with All files access.
 
 ## Building
 
