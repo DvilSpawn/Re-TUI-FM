@@ -90,7 +90,11 @@ open class MainActivity : Activity() {
 
     private data class SearchRequest(
         val nameTerm: String?,
-        val typeTerm: String?
+        val typeTerm: String?,
+        val minBytes: Long? = null,
+        val maxBytes: Long? = null,
+        val modifiedAfter: Long? = null,
+        val modifiedBefore: Long? = null
     )
 
     private data class PaneState(
@@ -820,7 +824,9 @@ open class MainActivity : Activity() {
 
     private fun buildStorageSection(): View {
         val panel = homePanel("STORAGE")
-        addHomeRow(panel, "Phone storage", storageLine(homeDirectory()), "") { showTree(homeDirectory()) }
+        for (root in storageRoots()) {
+            addHomeRow(panel, storageRootLabel(root), storageLine(root), "") { navigateMain(root) }
+        }
         addHomeRow(panel, "Recently deleted", "${trashFileCount()} items", "") { showRecentlyDeleted() }
         return panel
     }
@@ -1025,6 +1031,7 @@ open class MainActivity : Activity() {
         for (file in visible.take(MAX_ROWS)) {
             pane.rows.add(FileEntry(file, file.name, file.isDirectory))
         }
+        if (visible.size > MAX_ROWS) pane.rows.add(FileEntry(null, "Showing first $MAX_ROWS items. Refine this folder or search.", false))
         if (children == null) pane.rows.add(FileEntry(null, "Folder unavailable. Open File > Storage access.", false))
         pane.summary = summarizeRows(pane.rows)
         if (pane.cursor >= pane.rows.size) pane.cursor = max(0, pane.rows.size - 1)
@@ -1040,7 +1047,7 @@ open class MainActivity : Activity() {
             "Documents" to File(home, Environment.DIRECTORY_DOCUMENTS),
             "Pictures" to File(home, Environment.DIRECTORY_PICTURES),
             "Music" to File(home, Environment.DIRECTORY_MUSIC)
-        )
+        ) + storageRoots().drop(1).map { storageRootLabel(it) to it }
         val seen = HashSet<String>()
         val entries = candidates.mapNotNull { (label, file) ->
             if (file.exists() && file.isDirectory && seen.add(file.absolutePath)) {
@@ -2317,6 +2324,13 @@ open class MainActivity : Activity() {
         showOutput("PLACES", "Added to Places:\n${file.absolutePath}")
     }
 
+    private fun removePlace(path: String) {
+        val paths = customPlacePaths().filterNot { it == path }
+        themePrefs().edit().putString(PREF_CUSTOM_PLACES, paths.joinToString("\n")).apply()
+        reloadAll()
+        showOutput("PLACES", "Removed bookmark:\n$path")
+    }
+
     private fun promptMkdir(baseDir: File = contentPane().directory) {
         val panel = dialogPanel("New folder")
         val path = label(baseDir.absolutePath, max(10, outputTextSizeSp - 2), false)
@@ -2379,7 +2393,7 @@ open class MainActivity : Activity() {
         input.setTextSize(scaledFontSp(inputFontSizeSp, fontScaleOffsetSp))
         input.setPadding(dp(8), 0, dp(8), 0)
         input.background = addressDrawable()
-        input.hint = "Name contains..."
+        input.hint = "Name, type; size>10M newer>7d"
         val inputParams = LinearLayout.LayoutParams(-1, dp(48))
         inputParams.topMargin = dp(8)
         panel.addView(input, inputParams)
@@ -2402,7 +2416,7 @@ open class MainActivity : Activity() {
     private fun runFind(request: SearchRequest, root: File = contentPane().directory) {
         val label = searchLabel(request)
         if (label.isBlank()) {
-            showOutput("FIND", "find: usage: find [name] [type]")
+            showOutput("FIND", "find: [name] [type] [size>10M] [newer>7d]")
             return
         }
         val loadVersion = ++findVersion
@@ -2410,9 +2424,13 @@ open class MainActivity : Activity() {
         Toast.makeText(this, "Searching...", Toast.LENGTH_SHORT).show()
         Thread {
             val out = ArrayList<FileEntry>()
-            root.walkTopDown().onEnter { showHidden || it == root || !it.name.startsWith(".") }.onFail { _, _ -> }.forEach { file ->
-                if (!showHidden && file.name.startsWith(".")) return@forEach
-                if (out.size >= MAX_ROWS) return@forEach
+            var truncated = false
+            for (file in root.walkTopDown().onEnter { showHidden || it == root || !it.name.startsWith(".") }.onFail { _, _ -> }) {
+                if (!showHidden && file.name.startsWith(".")) continue
+                if (out.size >= MAX_ROWS) {
+                    truncated = true
+                    break
+                }
                 if (matchesSearch(file, request)) {
                     out.add(FileEntry(file, file.name, file.isDirectory))
                 }
@@ -2422,7 +2440,8 @@ open class MainActivity : Activity() {
                     showFindRows(
                         label,
                         root,
-                        if (out.isEmpty()) listOf(FileEntry(null, "No matches for $label", false)) else out
+                        if (out.isEmpty()) listOf(FileEntry(null, "No matches for $label", false))
+                        else out.apply { if (truncated) add(FileEntry(null, "Showing first $MAX_ROWS matches. Refine the search.", false)) }
                     )
                 }
             }
@@ -2434,12 +2453,13 @@ open class MainActivity : Activity() {
     }
 
     private fun searchRequestFromParts(parts: List<String>): SearchRequest {
-        if (parts.isEmpty()) return SearchRequest(null, null)
-        val last = parts.last()
-        return if (parts.size >= 2 && isSearchTypeToken(last)) {
-            SearchRequest(cleanSearchTerm(parts.dropLast(1).joinToString(" ")), cleanSearchTerm(last))
+        val filters = parseSearchFilters(parts, System.currentTimeMillis())
+        if (filters.terms.isEmpty()) return SearchRequest(null, null, filters.minBytes, filters.maxBytes, filters.modifiedAfter, filters.modifiedBefore)
+        val last = filters.terms.last()
+        return if (filters.terms.size >= 2 && isSearchTypeToken(last)) {
+            SearchRequest(cleanSearchTerm(filters.terms.dropLast(1).joinToString(" ")), cleanSearchTerm(last), filters.minBytes, filters.maxBytes, filters.modifiedAfter, filters.modifiedBefore)
         } else {
-            SearchRequest(cleanSearchTerm(parts.joinToString(" ")), null)
+            SearchRequest(cleanSearchTerm(filters.terms.joinToString(" ")), null, filters.minBytes, filters.maxBytes, filters.modifiedAfter, filters.modifiedBefore)
         }
     }
 
@@ -2454,11 +2474,24 @@ open class MainActivity : Activity() {
     private fun searchLabel(request: SearchRequest): String {
         val name = request.nameTerm ?: "*"
         val type = request.typeTerm
-        return if (type.isNullOrBlank()) request.nameTerm.orEmpty() else "$name $type"
+        val terms = if (type.isNullOrBlank()) request.nameTerm.orEmpty() else "$name $type"
+        return listOfNotNull(
+            terms.takeIf { it.isNotBlank() },
+            request.minBytes?.let { "size>${humanSize(it - 1)}" },
+            request.maxBytes?.let { "size<${humanSize(it + 1)}" },
+            request.modifiedAfter?.let { "newer" },
+            request.modifiedBefore?.let { "older" }
+        ).joinToString(" ")
     }
 
     private fun matchesSearch(file: File, request: SearchRequest): Boolean {
+        val size = file.length()
+        val modified = file.lastModified()
         return matchesName(file.name, request.nameTerm) && matchesType(file, request.typeTerm)
+            && (request.minBytes == null || size >= request.minBytes)
+            && (request.maxBytes == null || size <= request.maxBytes)
+            && (request.modifiedAfter == null || modified > request.modifiedAfter)
+            && (request.modifiedBefore == null || modified < request.modifiedBefore)
     }
 
     private fun matchesName(name: String, term: String?): Boolean {
@@ -3030,6 +3063,13 @@ open class MainActivity : Activity() {
             if (entry.isTrashPlace) return@mapNotNull entry.label to { showTrashContents() }
             val file = entry.file ?: return@mapNotNull null
             entry.label to { showDirectoryContents(file) }
+        }.toMutableList()
+        if (customPlacePaths().isNotEmpty()) {
+            items += "Manage bookmarks" to {
+                showActionMenu("Remove bookmark", customPlacePaths().map { path ->
+                    File(path).name.ifBlank { path } to { removePlace(path) }
+                })
+            }
         }
         showActionMenu("Places", items)
     }
@@ -3300,6 +3340,21 @@ open class MainActivity : Activity() {
     private fun homeDirectory(): File {
         val external = Environment.getExternalStorageDirectory()
         return if (external.exists()) external else File("/")
+    }
+
+    private fun storageRoots(): List<File> {
+        val home = homeDirectory()
+        val roots = linkedSetOf(home.absolutePath)
+        for (appDirectory in getExternalFilesDirs(null)) {
+            var root = appDirectory
+            repeat(4) { root = root?.parentFile }
+            root?.takeIf { it.exists() && it.isDirectory }?.let { roots += it.absolutePath }
+        }
+        return roots.map(::File)
+    }
+
+    private fun storageRootLabel(root: File): String {
+        return if (root.absolutePath == homeDirectory().absolutePath) "Phone storage" else "Removable storage (${root.name})"
     }
 
     private fun resolveStartDirectory(intent: Intent?): File {

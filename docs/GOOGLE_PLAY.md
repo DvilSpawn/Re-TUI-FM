@@ -84,3 +84,7 @@ Version code 20 adds legacy read/write permissions capped at API 29 and enables 
 ## Transfer reliability — v0.1.20
 
 Version code 21 adds right-pane progress, cancellation, collision choices, cleanup of partial copies, and a clear completed/skipped/failed summary for copy and move. Backgrounding the app does not cancel an in-progress transfer; process termination remains outside the app's control. Device testing should cover large transfers, low storage, collision choices, cancellation, and background/return behavior.
+
+## Search and removable storage — v0.1.22
+
+Version code 22 adds size and modified-date search filters, bookmark removal, explicit 5,000-item truncation notices, and discovery of mounted external storage roots through Android's external-files directories. Opening a discovered root uses the existing Android storage-permission recovery flow. Test actual SD card and USB media on representative devices, including permission denial, removal while browsing, and protected-folder behavior.
