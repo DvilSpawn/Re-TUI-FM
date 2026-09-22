@@ -11,13 +11,6 @@ failed=0
 pass() { printf 'PASS  %s\n' "$1"; passed=$((passed + 1)); }
 fail() { printf 'FAIL  %s -- %s\n' "$1" "$2"; failed=$((failed + 1)); }
 
-launch() {
-  adb shell am force-stop "$PACKAGE" >/dev/null
-  adb shell am start -W -a "$ACTION" -p "$PACKAGE" \
-    --es path "$ROOT" --es command "'$1'" >/dev/null
-  sleep 2
-}
-
 launch_action() {
   local action=$1 path=${2:-$ROOT}
   adb shell am force-stop "$PACKAGE" >/dev/null
@@ -91,16 +84,17 @@ if [[ -z "$serial" ]]; then
   printf 'No running Android emulator found.\n' >&2
   exit 2
 fi
-adb() { "$ADB_BIN" -s "$serial" "$@"; }
+adb() { command "$ADB_BIN" -s "$serial" "$@"; }
 
 adb wait-for-device
 adb shell appops set "$PACKAGE" MANAGE_EXTERNAL_STORAGE allow >/dev/null 2>&1 || true
 adb shell rm -rf "$ROOT"
-adb shell mkdir -p "$ROOT/inbox" "$ROOT/archive"
+adb shell mkdir -p "$ROOT/inbox" "$ROOT/archive" "$ROOT/projects"
 adb shell mkdir -p "$ROOT/scroll"
 printf 'hello from RETUI FM\n' | adb shell sh -c "'cat > $ROOT/inbox/note.txt'"
 printf 'second selected file\n' | adb shell sh -c "'cat > $ROOT/inbox/second.txt'"
-adb push app/build/outputs/apk/debug/app-debug.apk "$ROOT/return-test.apk" >/dev/null
+printf 'delete confirmation fixture\n' | adb shell sh -c "'cat > $ROOT/inbox/delete-test.txt'"
+adb push app/build/outputs/apk/github/debug/app-github-debug.apk "$ROOT/return-test.apk" >/dev/null
 adb shell content delete --uri content://media/external/file \
   --where "_data='$ROOT/return-test.apk'" >/dev/null 2>&1 || true
 adb shell content insert --uri content://media/external/file \
@@ -109,30 +103,30 @@ adb shell content insert --uri content://media/external/file \
   --bind _display_name:s:return-test.apk >/dev/null
 adb shell sh -c "'i=1; while [ \$i -le 24 ]; do touch $ROOT/scroll/item-\$(printf %02d \$i).txt; i=\$((i + 1)); done'"
 
-launch 'mkdir projects'
-expect_file 'create a folder' "$ROOT/projects"
-
-launch 'cp inbox/note.txt projects/copied.txt'
-expect_file 'copy a file' "$ROOT/projects/copied.txt"
-
-launch 'mv projects/copied.txt archive/moved.txt'
-expect_file 'move or rename a file' "$ROOT/archive/moved.txt"
-expect_absent 'move removes the source' "$ROOT/projects/copied.txt"
-
-launch 'preview archive/moved.txt'
-expect_ui 'preview a text file' 'hello from RETUI FM'
+launch_action open "$ROOT/inbox"
+expect_ui 'structured open action opens a directory' 'note.txt'
+if tap_text note.txt; then
+  expect_ui 'preview a text file' 'hello from RETUI FM'
+  adb shell input keyevent BACK
+else
+  fail 'preview a text file' 'note.txt was not found'
+fi
 
 adb shell am force-stop "$PACKAGE" >/dev/null
 adb shell am start -W -a "$ACTION" -p "$PACKAGE" --es action search \
-  --es path "$ROOT" --es search_name moved >/dev/null
+  --es path "$ROOT" --es search_name note >/dev/null
 sleep 2
-expect_ui 'search by file name' 'moved.txt'
-
-launch 'rm archive/moved.txt'
-expect_ui 'deletion asks for confirmation' 'Delete moved.txt?'
+expect_ui 'search by file name' 'note.txt'
 
 launch_action open "$ROOT/inbox"
-expect_ui 'structured open action opens a directory' 'note.txt'
+if long_press_text delete-test.txt && tap_text TRASH; then
+  expect_ui 'deletion asks for confirmation' 'Move 1 items to trash?'
+  adb shell input keyevent BACK
+else
+  fail 'deletion asks for confirmation' 'delete-test.txt or TRASH action not found'
+fi
+
+launch_action open "$ROOT/inbox"
 if long_press_text note.txt; then
   expect_ui 'long press starts selection mode' '1 selected'
 else
@@ -191,7 +185,7 @@ if tap_text COPY; then
   sleep 1
   if tap_text projects; then
     expect_ui 'pending copy survives folder navigation' 'PASTE'
-    if tap_text PASTE && tap_text PASTE; then
+    if tap_text PASTE && tap_text COPY; then
       sleep 2
       expect_file 'paste copies the first selected file' "$ROOT/projects/note.txt"
       expect_file 'paste copies every selected file' "$ROOT/projects/second.txt"
@@ -213,7 +207,7 @@ if tap_text MOVE; then
   sleep 1
   if tap_text archive; then
     expect_ui 'pending move survives folder navigation' 'MOVE HERE'
-    if tap_text 'MOVE HERE' && tap_text 'MOVE HERE'; then
+    if tap_text 'MOVE HERE' && tap_text MOVE; then
       sleep 2
       expect_file 'bulk move selected files' "$ROOT/archive/note.txt"
       expect_file 'bulk move keeps every selected item' "$ROOT/archive/second.txt"

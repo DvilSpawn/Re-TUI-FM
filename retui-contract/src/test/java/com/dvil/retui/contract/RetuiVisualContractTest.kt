@@ -1,6 +1,7 @@
 package com.dvil.retui.contract
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -38,5 +39,12 @@ class RetuiVisualContractTest {
                 )
             )
         )
+    }
+
+    @Test
+    fun parsesAppearanceColorInputs() {
+        assertEquals(0x80112233.toInt(), RetuiVisualContract.parseColor("0x80112233"))
+        assertEquals(0xff112233.toInt(), RetuiVisualContract.parseColor("0x112233"))
+        assertNull(RetuiVisualContract.parseColor("not-a-color"))
     }
 }

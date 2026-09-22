@@ -46,6 +46,7 @@ import android.widget.GridView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
@@ -66,6 +67,13 @@ open class MainActivity : Activity() {
     private enum class Panel { LEFT, RIGHT }
     private enum class Screen { HOME, TREE }
     private enum class SortMode { NAME_ASC, NAME_DESC, MODIFIED_NEWEST, MODIFIED_OLDEST, SIZE_LARGEST, SIZE_SMALLEST, TYPE }
+
+    private data class ThemeColorBinding(
+        val label: String,
+        val key: String,
+        val get: () -> Int,
+        val set: (Int) -> Unit
+    )
 
     private data class FileEntry(
         val file: File?,
@@ -228,7 +236,16 @@ open class MainActivity : Activity() {
         runTrashCleanup()
         if (shouldOpenTree(intent)) showTree(start) else showHome()
         handleIncomingRequest(intent)
-        ensureStorageAccess()
+        val walkthroughComplete = themePrefs().getBoolean(PREF_WALKTHROUGH_COMPLETE, false)
+        val incomingRequest = shouldOpenTree(intent) || (intent?.action != null && intent?.action != Intent.ACTION_MAIN)
+        val showFirstRunTour = shouldShowFirstRunWalkthrough(
+            completed = walkthroughComplete,
+            floatingWindow = floatingWindow,
+            restoringState = savedInstanceState != null,
+            incomingRequest = incomingRequest
+        )
+        if (showFirstRunTour) showWalkthrough(firstRun = true)
+        else if (shouldRequestInitialStorageAccess(walkthroughComplete, floatingWindow, incomingRequest)) ensureStorageAccess()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -252,6 +269,7 @@ open class MainActivity : Activity() {
         setContentView(buildUi())
         if (shouldOpenTree(intent)) showTree(start) else showHome()
         handleIncomingRequest(intent)
+        if (shouldOpenTree(intent) || (intent?.action != null && intent.action != Intent.ACTION_MAIN)) ensureStorageAccess()
     }
 
     override fun onResume() {
@@ -386,11 +404,13 @@ open class MainActivity : Activity() {
         main.addView(buildTopBar(), LinearLayout.LayoutParams(-1, dp(18)))
         main.addView(buildMenuBar(), LinearLayout.LayoutParams(-1, dp(30)))
         main.addView(buildAddressBar(), LinearLayout.LayoutParams(-1, dp(36)))
-        main.addView(buildSelectionBar(), LinearLayout.LayoutParams(-1, dp(38)))
+        val workspace = FrameLayout(this)
         contentHost = FrameLayout(this)
-        val hostParams = LinearLayout.LayoutParams(-1, 0, 1f)
-        hostParams.topMargin = dp(4)
-        main.addView(contentHost, hostParams)
+        workspace.addView(contentHost, FrameLayout.LayoutParams(-1, -1))
+        workspace.addView(buildSelectionBar(), FrameLayout.LayoutParams(-1, dp(38), Gravity.TOP))
+        val workspaceParams = LinearLayout.LayoutParams(-1, 0, 1f)
+        workspaceParams.topMargin = dp(4)
+        main.addView(workspace, workspaceParams)
         return root
     }
 
@@ -2687,7 +2707,7 @@ open class MainActivity : Activity() {
             host.removeView(view)
             host.getChildAt(0)?.visibility = View.VISIBLE
             paneDialog = null
-            if (returnHome) showHome()
+            if (returnHome) showHome() else updateSelectionBar()
         }
     }
 
@@ -2715,6 +2735,7 @@ open class MainActivity : Activity() {
         scroll.setBackgroundColor(background)
         scroll.addView(panel, FrameLayout.LayoutParams(-1, -2))
         host.getChildAt(0)?.visibility = View.GONE
+        selectionBar?.visibility = View.GONE
         host.addView(scroll, FrameLayout.LayoutParams(-1, -1))
         val dialog = PaneDialog(host, scroll, returnHome)
         paneDialog = dialog
@@ -2780,6 +2801,10 @@ open class MainActivity : Activity() {
 
         lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
+        addDialogButton(buttons, "TOUR") {
+            dialog.dismiss()
+            showWalkthrough()
+        }
         addDialogButton(buttons, "OK") { dialog.dismiss() }
         val buttonParams = LinearLayout.LayoutParams(-1, dp(48))
         buttonParams.topMargin = dp(8)
@@ -2797,11 +2822,67 @@ open class MainActivity : Activity() {
             "\nSearch:\n" +
             "Tap the path bar to search all phone storage by name.\n" +
             "Long-press a folder and choose Search this folder to search inside it.\n" +
+            "Add size>10M or size<500K for size limits.\n" +
+            "Add newer>7d or older>12h for modified-date limits.\n" +
+            "Use a file type such as pdf, image, audio, archive, apk, or folder.\n" +
+            "\nWhat's new in ${currentVersionName()}:\n" +
+            "First-run guidance, expanded Help and privacy details, support links, and local Appearance color controls.\n" +
+            "\nPrivacy:\n" +
+            privacySummary() + "\n" +
+            "\nCustomization:\n" +
+            "Follows Launcher themes and supports font choice/import, font scale, hidden files, sorting, and an adaptive grid.\n" +
             "\nKeyboard:\n" +
             "arrows move/open\n" +
             "Enter opens selected\n" +
             "Tab/Left switches pane"
     }
+
+    private fun showWalkthrough(step: Int = 0, firstRun: Boolean = false) {
+        val pages = listOf(
+            "BROWSE\n\nUse Places on the left to choose a location. Folder contents stay on the right, so you can keep your bearings while you browse.",
+            "SELECT AND ACT\n\nLong-press a file or folder to select it. Then copy, move, share, create a ZIP, or send it to Trash. Transfers show progress and can be cancelled.",
+            "FIND YOUR FILES\n\nSearch by name or type, and add filters such as size>10M, size<500K, newer>7d, or older>12h.\n\nAndroid storage access is needed for browsing and managing files across phone and removable storage. You remain in control of that permission."
+        )
+        val page = step.coerceIn(pages.indices)
+        val panel = dialogPanel("QUICK TOUR ${page + 1}/${pages.size}")
+        val body = label(pages[page], max(10, outputTextSizeSp - 1), false)
+        body.gravity = Gravity.START
+        body.setSingleLine(false)
+        body.setTextColor(outputTextColor)
+        body.setPadding(dp(8), dp(12), dp(8), dp(12))
+        val bodyScroll = ScrollView(this)
+        bodyScroll.addView(body, FrameLayout.LayoutParams(-1, -2))
+        panel.addView(bodyScroll, LinearLayout.LayoutParams(-1, dp(300)))
+
+        lateinit var dialog: PaneDialog
+        val buttons = dialogButtonRow()
+        if (page > 0) addDialogButton(buttons, "BACK") {
+            dialog.dismiss()
+            showWalkthrough(page - 1, firstRun)
+        }
+        if (firstRun) addDialogButton(buttons, "SKIP") { finishWalkthrough(dialog, true) }
+        if (page < pages.lastIndex) addDialogButton(buttons, "NEXT") {
+            dialog.dismiss()
+            showWalkthrough(page + 1, firstRun)
+        } else {
+            addDialogButton(buttons, "DONE") { finishWalkthrough(dialog, firstRun) }
+        }
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
+        dialog = showDialogPanel(panel)
+    }
+
+    private fun finishWalkthrough(dialog: PaneDialog, requestStorage: Boolean) {
+        themePrefs().edit().putBoolean(PREF_WALKTHROUGH_COMPLETE, true).apply()
+        dialog.dismiss()
+        if (requestStorage) ensureStorageAccess()
+    }
+
+    private fun privacySummary(): String =
+        "Files stay on your device unless you choose to share or open them with another Android app. " +
+            "Re:T-UI Files has no accounts, ads, analytics, cloud upload, or automatic file transmission."
+
+    private fun currentVersionName(): String =
+        packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
 
     private fun selectedFile(): File? {
         val entry = activePane().rows.getOrNull(activePane().cursor) ?: return null
@@ -2868,18 +2949,153 @@ open class MainActivity : Activity() {
     private fun showSettingsMenu() {
         val days = themePrefs().getInt(PREF_TRASH_RETENTION_DAYS, DEFAULT_TRASH_RETENTION_DAYS)
         val value = if (days <= 0) "Never" else "$days days"
-        val acceptFrames = LauncherFrameStore(this).isAccepted()
-        val fontMode = currentFontModeLabel()
-        val scale = fontScaleLabel(fontScaleOffsetSp)
         showActionMenu(
             "Settings",
             listOf(
                 "Trash cleanup: $value" to { showTrashRetentionMenu() },
-                "Accept frames from Launcher: ${if (acceptFrames) "On" else "Off"}" to { toggleLauncherFrames(acceptFrames) },
-                "Font: $fontMode" to { showFontMenu() },
-                "Font scale: $scale" to { showFontScaleMenu() }
+                "Appearance" to { showAppearanceMenu() },
+                "Rate on Google Play" to { openPlayListing() },
+                "Send feedback" to { openExternal(Uri.parse(FEEDBACK_URL), null, "Feedback") },
+                "Privacy" to { showOutput("PRIVACY", "${privacySummary()}\n\nPolicy:\n$PRIVACY_URL") }
             )
         )
+    }
+
+    private fun showAppearanceMenu() {
+        val prefs = themePrefs()
+        val overridden = prefs.getBoolean(PREF_THEME_COLORS_OVERRIDDEN, false)
+        val launcherAvailable = prefs.getBoolean(PREF_LAUNCHER_THEME_AVAILABLE, false) ||
+            prefs.contains(RetuiVisualContract.BG)
+        val source = when {
+            overridden -> "Files override"
+            launcherAvailable -> "Re:TUI Launcher"
+            else -> "Files default"
+        }
+        val items = mutableListOf<Pair<String, () -> Unit>>()
+        items += "Theme source: $source" to {
+            showOutput("THEME SOURCE", "Using $source colors.")
+        }
+        items += "Follow Re:TUI Launcher colors" to {
+            if (launcherAvailable) clearThemeColorOverride()
+            else showOutput("APPEARANCE", "Open Re:TUI Launcher first so Files can receive its theme.")
+        }
+        themeColorBindings().forEach { binding ->
+            items += "${binding.label}: ${colorHex(binding.get())}" to { showThemeColorEditor(binding) }
+        }
+        val acceptFrames = LauncherFrameStore(this).isAccepted()
+        items += "Accept frames from Launcher: ${if (acceptFrames) "On" else "Off"}" to {
+            toggleLauncherFrames(acceptFrames)
+        }
+        items += "Font: ${currentFontModeLabel()}" to { showFontMenu() }
+        items += "Font scale: ${fontScaleLabel(fontScaleOffsetSp)}" to { showFontScaleMenu() }
+        showActionMenu("Appearance", items)
+    }
+
+    private fun showThemeColorEditor(binding: ThemeColorBinding) {
+        var color = binding.get()
+        val panel = dialogPanel(binding.label)
+        val swatch = View(this)
+        val swatchParams = LinearLayout.LayoutParams(-1, dp(52))
+        swatchParams.setMargins(0, dp(8), 0, dp(8))
+        panel.addView(swatch, swatchParams)
+
+        val input = EditText(this)
+        input.setSingleLine(true)
+        input.setSelectAllOnFocus(true)
+        input.typeface = appTypeface
+        input.setTextColor(inputTextColor)
+        input.setTextSize(scaledFontSp(inputFontSizeSp, fontScaleOffsetSp))
+        input.background = addressDrawable()
+        input.setPadding(dp(8), 0, dp(8), 0)
+        panel.addView(input, LinearLayout.LayoutParams(-1, dp(44)))
+
+        fun render(next: Int) {
+            color = next
+            input.setText(colorHex(color))
+            input.setSelection(input.text.length)
+            swatch.background = GradientDrawable().apply {
+                setColor(color)
+                setStroke(dp(1), outputBorderColor)
+            }
+        }
+
+        listOf('A', 'R', 'G', 'B').forEach { channel ->
+            val row = LinearLayout(this)
+            row.orientation = LinearLayout.HORIZONTAL
+            row.gravity = Gravity.CENTER_VERTICAL
+            val value = label("$channel ${colorChannel(color, channel)}", max(9, outputTextSizeSp - 2), true)
+            value.gravity = Gravity.CENTER_VERTICAL
+            row.addView(value, LinearLayout.LayoutParams(dp(54), dp(38)))
+            val slider = SeekBar(this)
+            slider.max = 255
+            slider.progress = colorChannel(color, channel)
+            slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    if (!fromUser) return
+                    render(replaceColorChannel(color, channel, progress))
+                    value.text = "$channel ${colorChannel(color, channel)}"
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            })
+            row.addView(slider, LinearLayout.LayoutParams(0, dp(38), 1f))
+            panel.addView(row, LinearLayout.LayoutParams(-1, dp(38)))
+        }
+
+        lateinit var dialog: PaneDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
+        addDialogButton(buttons, "APPLY") {
+            val parsed = RetuiVisualContract.parseColor(input.text.toString())
+            if (parsed == null) {
+                input.error = "Use #AARRGGBB or #RRGGBB"
+                return@addDialogButton
+            }
+            binding.set(parsed)
+            saveThemeColorOverride()
+            dialog.dismiss()
+            recreate()
+        }
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
+        render(color)
+        dialog = showDialogPanel(panel, input)
+    }
+
+    private fun colorChannel(color: Int, channel: Char): Int = when (channel) {
+        'A' -> Color.alpha(color)
+        'R' -> Color.red(color)
+        'G' -> Color.green(color)
+        else -> Color.blue(color)
+    }
+
+    private fun replaceColorChannel(color: Int, channel: Char, value: Int): Int = Color.argb(
+        if (channel == 'A') value else Color.alpha(color),
+        if (channel == 'R') value else Color.red(color),
+        if (channel == 'G') value else Color.green(color),
+        if (channel == 'B') value else Color.blue(color)
+    )
+
+    private fun colorHex(color: Int): String = String.format(Locale.US, "#%08X", color)
+
+    private fun openPlayListing() {
+        openExternal(Uri.parse(PLAY_MARKET_URL), Uri.parse(PLAY_HTTPS_URL), "Google Play")
+    }
+
+    private fun openExternal(primary: Uri, fallback: Uri?, label: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, primary))
+        } catch (_: ActivityNotFoundException) {
+            if (fallback != null) {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, fallback))
+                } catch (_: ActivityNotFoundException) {
+                    showOutput(label, "No app is available to open this link.\n\n$fallback")
+                }
+            } else {
+                showOutput(label, "No app is available to open this link.\n\n$primary")
+            }
+        }
     }
 
     private fun toggleLauncherFrames(current: Boolean) {
@@ -3452,9 +3668,12 @@ open class MainActivity : Activity() {
                 .apply()
         }
         if (RetuiVisualContract.hasVisualPayload(intent)) saveThemePayload(prefs, intent)
+        applyStoredThemeColorOverride(prefs)
         applyLocalFontOverride(prefs)
         appTypeface = resolveTypeface()
-        launcherFrameRuntime?.textColor?.let { color ->
+        launcherFrameRuntime?.textColor?.takeUnless {
+            prefs.getBoolean(PREF_THEME_COLORS_OVERRIDDEN, false)
+        }?.let { color ->
             textColor = color
             inputTextColor = color
             outputTextColor = color
@@ -3465,6 +3684,56 @@ open class MainActivity : Activity() {
             headerTextColor = color
             moduleButtonTextColor = color
         }
+    }
+
+    private fun themeColorBindings(): List<ThemeColorBinding> = listOf(
+        ThemeColorBinding("App background", RetuiVisualContract.BG, { bgColor }) { bgColor = it },
+        ThemeColorBinding("Window background", RetuiVisualContract.TERMINAL_BG, { panelColor }) { panelColor = it },
+        ThemeColorBinding("Shared text", RetuiVisualContract.TEXT, { textColor }) {
+            textColor = it
+            fileTextColor = it
+        },
+        ThemeColorBinding("Shared border", RetuiVisualContract.BORDER, { borderColor }) { borderColor = it },
+        ThemeColorBinding("Panel background", RetuiVisualContract.PANEL_BG, { modulePanelColor }) { modulePanelColor = it },
+        ThemeColorBinding("Panel text", RetuiVisualContract.PANEL_TEXT, { moduleTextColor }) { moduleTextColor = it },
+        ThemeColorBinding("Panel border", RetuiVisualContract.PANEL_BORDER, { moduleBorderColor }) { moduleBorderColor = it },
+        ThemeColorBinding("Header background", RetuiVisualContract.HEADER_BG, { headerPanelColor }) { headerPanelColor = it },
+        ThemeColorBinding("Header text", RetuiVisualContract.HEADER_TEXT, { headerTextColor }) { headerTextColor = it },
+        ThemeColorBinding("Button background", RetuiVisualContract.BUTTON_BG, { moduleButtonBgColor }) { moduleButtonBgColor = it },
+        ThemeColorBinding("Button text", RetuiVisualContract.BUTTON_TEXT, { moduleButtonTextColor }) { moduleButtonTextColor = it },
+        ThemeColorBinding("Button border", RetuiVisualContract.BUTTON_BORDER, { moduleButtonBorderColor }) { moduleButtonBorderColor = it },
+        ThemeColorBinding("Input background", RetuiVisualContract.INPUT_BG, { inputBgColor }) { inputBgColor = it },
+        ThemeColorBinding("Input text", RetuiVisualContract.INPUT_TEXT, { inputTextColor }) { inputTextColor = it },
+        ThemeColorBinding("Output background", RetuiVisualContract.OUTPUT_BG, { outputPanelColor }) { outputPanelColor = it },
+        ThemeColorBinding("Output text", RetuiVisualContract.OUTPUT_TEXT, { outputTextColor }) { outputTextColor = it },
+        ThemeColorBinding("Output border", RetuiVisualContract.OUTPUT_BORDER, { outputBorderColor }) { outputBorderColor = it },
+        ThemeColorBinding("Directory text", RetuiVisualContract.DIRECTORY_TEXT, { directoryTextColor }) { directoryTextColor = it },
+        ThemeColorBinding("Selection background", RetuiVisualContract.SELECTION_BG, { selectionBgColor }) { selectionBgColor = it },
+        ThemeColorBinding("Selection text", RetuiVisualContract.SELECTION_TEXT, { selectionTextColor }) { selectionTextColor = it }
+    )
+
+    private fun applyStoredThemeColorOverride(prefs: SharedPreferences) {
+        val enabled = prefs.getBoolean(PREF_THEME_COLORS_OVERRIDDEN, false)
+        themeColorBindings().forEach { binding ->
+            val key = PREF_THEME_COLOR_PREFIX + binding.key
+            val stored = if (prefs.contains(key)) prefs.getInt(key, binding.get()) else null
+            binding.set(resolveThemeColor(binding.get(), enabled, stored))
+        }
+    }
+
+    private fun saveThemeColorOverride() {
+        val editor = themePrefs().edit().putBoolean(PREF_THEME_COLORS_OVERRIDDEN, true)
+        themeColorBindings().forEach { binding ->
+            editor.putInt(PREF_THEME_COLOR_PREFIX + binding.key, binding.get())
+        }
+        editor.apply()
+    }
+
+    private fun clearThemeColorOverride() {
+        val editor = themePrefs().edit().putBoolean(PREF_THEME_COLORS_OVERRIDDEN, false)
+        themeColorBindings().forEach { binding -> editor.remove(PREF_THEME_COLOR_PREFIX + binding.key) }
+        editor.apply()
+        recreate()
     }
 
     private fun putThemeExtras(intent: Intent) {
@@ -3657,6 +3926,7 @@ open class MainActivity : Activity() {
         editor.putString(RetuiVisualContract.TERMINAL_BG_IMAGE, terminalBackgroundImage)
         editor.putString(RetuiVisualContract.FONT_PATH, appFontPath)
         editor.putString(RetuiVisualContract.FONT_NAME, appFontName)
+        editor.putBoolean(PREF_LAUNCHER_THEME_AVAILABLE, true)
         displayMarginsString(intent)?.let { editor.putString(RetuiVisualContract.DISPLAY_MARGIN_TOP, it) }
         editor.apply()
     }
@@ -4094,9 +4364,13 @@ open class MainActivity : Activity() {
         private const val PREF_TRASH_RETENTION_DAYS = "trash_retention_days"
         private const val PREF_TRASH_RETENTION_INITIALIZED = "trash_retention_initialized"
         private const val PREF_LAST_TRASH_CLEANUP = "last_trash_cleanup"
+        private const val PREF_WALKTHROUGH_COMPLETE = "walkthrough_complete"
         private const val PREF_FONT_SCALE_OFFSET = "font_scale_offset"
         private const val PREF_FONT_MODE = "font_override_mode"
         private const val PREF_CUSTOM_FONT_PATH = "custom_font_path"
+        private const val PREF_THEME_COLORS_OVERRIDDEN = "theme.colorsOverridden"
+        private const val PREF_THEME_COLOR_PREFIX = "theme.override."
+        private const val PREF_LAUNCHER_THEME_AVAILABLE = "theme.launcher.available"
         private const val FONT_MODE_CUSTOM = "custom"
         private const val FONT_MODE_SYSTEM = "system"
         private const val FONT_MODE_DEFAULT = "default"
@@ -4110,6 +4384,10 @@ open class MainActivity : Activity() {
         private const val DAY_MILLIS = 24L * 60L * 60L * 1000L
         private const val MAX_ROWS = 5000
         private const val PREVIEW_MAX_BYTES = 64 * 1024
+        private const val PLAY_MARKET_URL = "market://details?id=com.dvil.retui.fm"
+        private const val PLAY_HTTPS_URL = "https://play.google.com/store/apps/details?id=com.dvil.retui.fm"
+        private const val FEEDBACK_URL = "https://github.com/DvilSpawn/Re-TUI-FM/issues/new"
+        private const val PRIVACY_URL = "https://github.com/DvilSpawn/Re-TUI-FM/blob/master/docs/privacy.html"
         private const val RIGHT_GRID_MIN_CELL_WIDTH_DP = 72
         private const val RIGHT_GRID_CELL_HEIGHT_DP = 82
         private const val CATEGORY_FIRST_PAGE_ROWS = 90
