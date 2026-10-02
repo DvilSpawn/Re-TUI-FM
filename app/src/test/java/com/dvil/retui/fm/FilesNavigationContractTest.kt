@@ -30,4 +30,30 @@ class FilesNavigationContractTest {
         assertEquals(current.canonicalPath, FilesNavigationContract.startDirectory(file.path, root).path)
         assertEquals(root.path, FilesNavigationContract.startDirectory("missing", root).path)
     }
+
+    @Test
+    fun searchScopeDeduplicatesReadableRootsAndTracksSkippedOnes() {
+        val root = Files.createTempDirectory("retui-search").toFile()
+        val duplicate = root.resolve(".").canonicalFile
+        val missing = root.resolve("missing")
+
+        val scope = FilesNavigationContract.searchScope(null, listOf(root, duplicate, missing))
+
+        assertEquals(listOf(root.canonicalPath), scope.roots.map { it.canonicalPath })
+        assertEquals(1, scope.skippedRoots)
+    }
+
+    @Test
+    fun explicitSearchRootStaysScopedToThatFolder() {
+        val storage = Files.createTempDirectory("retui-storage").toFile()
+        val folder = storage.resolve("folder").apply { mkdir() }
+        val file = folder.resolve("note.txt").apply { writeText("x") }
+        val sibling = storage.resolve("other.txt").apply { writeText("x") }
+
+        val scope = FilesNavigationContract.searchScope(folder, listOf(storage))
+
+        assertEquals(listOf(folder.canonicalPath), scope.roots.map { it.canonicalPath })
+        assertTrue(FilesNavigationContract.isWithin(file, scope.roots))
+        assertFalse(FilesNavigationContract.isWithin(sibling, scope.roots))
+    }
 }

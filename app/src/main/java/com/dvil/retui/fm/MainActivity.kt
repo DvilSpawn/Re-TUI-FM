@@ -55,6 +55,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
+import java.util.ArrayDeque
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipEntry
@@ -112,6 +113,18 @@ open class MainActivity : Activity() {
         var summary: String = ""
     )
 
+    private data class NavigationSnapshot(
+        val screen: Screen,
+        val left: PaneState,
+        val right: PaneState,
+        val panel: Panel,
+        val virtualTitle: String?,
+        val category: FileCategory?,
+        val archive: File?,
+        val archiveEntries: List<ArchiveExtractor.Entry>,
+        val archiveDirectory: String
+    )
+
     private lateinit var leftPane: PaneState
     private lateinit var rightPane: PaneState
     private var activePanel = Panel.LEFT
@@ -141,6 +154,9 @@ open class MainActivity : Activity() {
     private var shareSelectionMode = false
     private var showRightCursorHighlight = true
     private var rightSortMode = SortMode.NAME_ASC
+    private val navigationHistory = ArrayDeque<NavigationSnapshot>()
+    private var suppressNavigationHistory = false
+    private var backCallback: android.window.OnBackInvokedCallback? = null
     private var currentScreen = Screen.HOME
     private var rightVirtualTitle: String? = null
     private var activeArchive: File? = null
@@ -229,13 +245,13 @@ open class MainActivity : Activity() {
         val start = resolveStartDirectory(intent)
         leftPane = PaneState(start)
         rightPane = PaneState(start)
+        rightSortMode = savedSortMode()
         showHidden = themePrefs().getBoolean("show_hidden", false)
         setContentView(buildUi())
         if (floatingWindow) rootView?.post(::applyFloatingWindowBounds)
         rootView?.requestFocus()
         runTrashCleanup()
-        if (shouldOpenTree(intent)) showTree(start) else showHome()
-        handleIncomingRequest(intent)
+        displayIncomingIntent(intent, start)
         val walkthroughComplete = themePrefs().getBoolean(PREF_WALKTHROUGH_COMPLETE, false)
         val incomingRequest = shouldOpenTree(intent) || (intent?.action != null && intent?.action != Intent.ACTION_MAIN)
         val showFirstRunTour = shouldShowFirstRunWalkthrough(
@@ -246,6 +262,11 @@ open class MainActivity : Activity() {
         )
         if (showFirstRunTour) showWalkthrough(firstRun = true)
         else if (shouldRequestInitialStorageAccess(walkthroughComplete, floatingWindow, incomingRequest)) ensureStorageAccess()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            backCallback = android.window.OnBackInvokedCallback { handleBackNavigation() }.also {
+                onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, it)
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -267,8 +288,7 @@ open class MainActivity : Activity() {
         leftPane = PaneState(start)
         rightPane = PaneState(start)
         setContentView(buildUi())
-        if (shouldOpenTree(intent)) showTree(start) else showHome()
-        handleIncomingRequest(intent)
+        displayIncomingIntent(intent, start)
         if (shouldOpenTree(intent) || (intent?.action != null && intent.action != Intent.ACTION_MAIN)) ensureStorageAccess()
     }
 
@@ -285,8 +305,8 @@ open class MainActivity : Activity() {
         if (firstResume) {
             firstResume = false
         } else if (::leftPane.isInitialized) {
-            if (currentScreen == Screen.HOME) showHome()
-            else activeCategory?.let(::showCategoryFiles) ?: reloadAll()
+            if (currentScreen == Screen.HOME) showHome(recordHistory = false)
+            else activeCategory?.let { showCategoryFiles(it, recordHistory = false) } ?: reloadAll()
         }
     }
 
@@ -302,7 +322,18 @@ open class MainActivity : Activity() {
         if (floatingWindow) rootView?.post(::applyFloatingWindowBounds)
     }
 
+    override fun onDestroy() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            backCallback?.let(onBackInvokedDispatcher::unregisterOnBackInvokedCallback)
+        }
+        super.onDestroy()
+    }
+
     override fun onBackPressed() {
+        handleBackNavigation()
+    }
+
+    private fun handleBackNavigation() {
         activeTransferCancellation?.let {
             it.set(true)
             return
@@ -312,27 +343,15 @@ open class MainActivity : Activity() {
             closeShareSelection()
             return
         }
-        if (activeArchive != null) {
-            if (archiveDirectory.isNotEmpty()) showArchiveDirectory(ArchiveExtractor.parent(archiveDirectory))
-            else closeArchive()
+        if (navigationHistory.isNotEmpty()) {
+            restoreNavigation(navigationHistory.removeLast())
             return
         }
-        if (currentScreen == Screen.HOME) {
-            finish()
+        if (currentScreen != Screen.HOME) {
+            showHome(recordHistory = false)
             return
         }
-        if (rightPane.directory == homeDirectory() && leftPane.directory == homeDirectory()) {
-            showHome()
-            return
-        }
-        val parent = rightPane.directory.parentFile
-        if (parent != null && rightPane.directory == leftPane.directory) {
-            navigateMain(parent)
-        } else if (parent != null) {
-            showDirectoryContents(parent)
-        } else {
-            finish()
-        }
+        finish()
     }
 
     private fun configureWindow() {
@@ -632,7 +651,7 @@ open class MainActivity : Activity() {
         address.gravity = Gravity.CENTER_VERTICAL
         address.setPadding(dp(8), 0, dp(8), 0)
         address.background = addressDrawable()
-        address.setOnClickListener { promptSearch(homeDirectory(), "Search device") }
+        address.setOnClickListener { promptSearch(null, "Search device") }
         val folder = ImageView(this)
         folder.setImageResource(R.drawable.ic_fm_folder)
         folder.setColorFilter(iconColor(false))
@@ -771,6 +790,7 @@ open class MainActivity : Activity() {
     }
 
     private fun sortRightPane() {
+        themePrefs().edit().putString(PREF_RIGHT_SORT_MODE, rightSortMode.name).apply()
         val sorted = sortedEntries(rightPane.rows)
         rightPane.rows.clear()
         rightPane.rows.addAll(sorted)
@@ -779,13 +799,77 @@ open class MainActivity : Activity() {
         renderPane(Panel.RIGHT)
     }
 
+    private fun savedSortMode(): SortMode =
+        SortMode.values().firstOrNull { it.name == themePrefs().getString(PREF_RIGHT_SORT_MODE, null) }
+            ?: SortMode.NAME_ASC
+
+    private fun copyPane(pane: PaneState) = PaneState(pane.directory, ArrayList(pane.rows), pane.cursor, pane.summary)
+
+    private fun captureNavigation() = NavigationSnapshot(
+        currentScreen, copyPane(leftPane), copyPane(rightPane), activePanel, rightVirtualTitle,
+        activeCategory, activeArchive, archiveEntries, archiveDirectory
+    )
+
+    private fun rememberNavigation() {
+        if (suppressNavigationHistory) return
+        if (navigationHistory.size == 32) navigationHistory.removeFirst()
+        navigationHistory.addLast(captureNavigation())
+    }
+
+    private fun restoreNavigation(snapshot: NavigationSnapshot) {
+        findVersion++
+        categoryLoadVersion++
+        archiveLoadVersion++
+        selectedPaths.clear()
+        suppressNavigationHistory = true
+        try {
+            if (snapshot.screen == Screen.HOME) {
+                showHome(recordHistory = false)
+                return
+            }
+            currentScreen = Screen.TREE
+            leftPane = copyPane(snapshot.left)
+            rightPane = copyPane(snapshot.right)
+            activePanel = snapshot.panel
+            rightVirtualTitle = snapshot.virtualTitle
+            activeCategory = snapshot.category
+            activeArchive = snapshot.archive
+            archiveEntries = snapshot.archiveEntries
+            archiveDirectory = snapshot.archiveDirectory
+            contentHost?.removeAllViews()
+            contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
+            renderAll()
+            updateSelectionBar()
+        } finally {
+            suppressNavigationHistory = false
+        }
+    }
+
+    private fun displayIncomingIntent(intent: Intent?, start: File) {
+        navigationHistory.clear()
+        currentScreen = Screen.HOME
+        rightVirtualTitle = null
+        activeCategory = null
+        val tree = shouldOpenTree(intent)
+        if (tree) navigationHistory.addLast(captureNavigation())
+        suppressNavigationHistory = true
+        try {
+            if (tree) showTree(start, recordHistory = false) else showHome(recordHistory = false)
+            handleIncomingRequest(intent)
+        } finally {
+            suppressNavigationHistory = false
+        }
+    }
+
     private fun shouldOpenTree(intent: Intent?): Boolean {
         return !intent?.getStringExtra(EXTRA_ACTION).isNullOrBlank() ||
             !intent?.getStringExtra(EXTRA_PATH).isNullOrBlank() ||
             searchRequestExtra(intent) != null
     }
 
-    private fun showHome() {
+    private fun showHome(recordHistory: Boolean = true) {
+        if (recordHistory && currentScreen != Screen.HOME) rememberNavigation()
+        findVersion++
         paneDialog = null
         selectedPaths.clear()
         clearVirtualCategory()
@@ -805,7 +889,8 @@ open class MainActivity : Activity() {
         contentHost?.addView(buildHomePage(), FrameLayout.LayoutParams(-1, -1))
     }
 
-    private fun showTree(dir: File = rightPane.directory) {
+    private fun showTree(dir: File = rightPane.directory, recordHistory: Boolean = true) {
+        if (recordHistory && currentScreen != Screen.TREE) rememberNavigation()
         currentScreen = Screen.TREE
         updateSelectionBar()
         homeCountVersion++
@@ -981,8 +1066,8 @@ open class MainActivity : Activity() {
                 val target = incomingTarget(intent)
                 if (target != null && target.exists()) shareFile(target) else showOutput("SHARE", "Not found: $it")
             }
-            ACTION_SEARCH -> searchRequestExtra(intent)?.let(::runFind)
-            else -> searchRequestExtra(intent)?.let(::runFind)
+            ACTION_SEARCH -> searchRequestExtra(intent)?.let { runFind(it, intentSearchRoot(intent)) }
+            else -> searchRequestExtra(intent)?.let { runFind(it, intentSearchRoot(intent)) }
         }
     }
 
@@ -995,6 +1080,9 @@ open class MainActivity : Activity() {
         intent?.getStringExtra(EXTRA_PATH),
         intent?.getStringExtra(EXTRA_TARGET)
     )
+
+    private fun intentSearchRoot(intent: Intent?): File? =
+        intent?.getStringExtra(EXTRA_PATH)?.takeIf { it.isNotBlank() }?.let(::File)
 
     private fun searchExtra(intent: Intent?): String? {
         return stringExtra(intent, EXTRA_SEARCH, "query", "q", "search_query")
@@ -1011,12 +1099,12 @@ open class MainActivity : Activity() {
 
     private fun reloadAll() {
         activeArchive?.let {
-            openArchive(it, archiveDirectory)
+            openArchive(it, archiveDirectory, recordHistory = false)
             return
         }
         clearVirtualCategory()
         if (currentScreen == Screen.HOME) {
-            showHome()
+            showHome(recordHistory = false)
             return
         }
         reloadPane(leftPane)
@@ -1105,7 +1193,8 @@ open class MainActivity : Activity() {
         }.start()
     }
 
-    private fun showCategoryFiles(category: FileCategory) {
+    private fun showCategoryFiles(category: FileCategory, recordHistory: Boolean = true) {
+        if (recordHistory) rememberNavigation()
         activeCategory = category
         val loadVersion = ++categoryLoadVersion
         showCategoryRows(category, listOf(FileEntry(null, "Loading ${category.label.lowercase(Locale.US)}...", false)))
@@ -1259,7 +1348,8 @@ open class MainActivity : Activity() {
         showTrashContents()
     }
 
-    private fun showTrashContents() {
+    private fun showTrashContents(recordHistory: Boolean = true) {
+        if (recordHistory) rememberNavigation()
         categoryLoadVersion++
         if (currentScreen != Screen.TREE || leftRowsView == null || rightGridView == null) {
             currentScreen = Screen.TREE
@@ -1522,7 +1612,7 @@ open class MainActivity : Activity() {
         navigateMain(dir)
     }
 
-    private fun showDirectoryContents(dir: File) {
+    private fun showDirectoryContents(dir: File, recordHistory: Boolean = true) {
         paneDialog?.dismiss()
         if (!hasStorageAccess()) {
             showStorageProblem(dir)
@@ -1540,9 +1630,10 @@ open class MainActivity : Activity() {
         selectedPaths.clear()
         updateSelectionBar()
         if (currentScreen != Screen.TREE) {
-            showTree(dir)
+            showTree(dir, recordHistory)
             return
         }
+        if (recordHistory && (rightVirtualTitle != null || rightPane.directory.canonicalPath != dir.canonicalPath)) rememberNavigation()
         clearVirtualCategory()
         rightPane.directory = dir
         rightPane.cursor = 0
@@ -1550,7 +1641,7 @@ open class MainActivity : Activity() {
         renderAll()
     }
 
-    private fun navigateMain(dir: File) {
+    private fun navigateMain(dir: File, recordHistory: Boolean = true) {
         paneDialog?.dismiss()
         if (!hasStorageAccess()) {
             showStorageProblem(dir)
@@ -1568,9 +1659,10 @@ open class MainActivity : Activity() {
         selectedPaths.clear()
         updateSelectionBar()
         if (currentScreen != Screen.TREE) {
-            showTree(dir)
+            showTree(dir, recordHistory)
             return
         }
+        if (recordHistory && (rightVirtualTitle != null || leftPane.directory.canonicalPath != dir.canonicalPath || rightPane.directory.canonicalPath != dir.canonicalPath)) rememberNavigation()
         navigateMainInTree(dir)
     }
 
@@ -1611,7 +1703,7 @@ open class MainActivity : Activity() {
         archiveDirectory = ""
     }
 
-    private fun openArchive(archive: File, directory: String = "") {
+    private fun openArchive(archive: File, directory: String = "", recordHistory: Boolean = true) {
         val loadVersion = ++archiveLoadVersion
         Toast.makeText(this, "Opening ${archive.name}", Toast.LENGTH_SHORT).show()
         Thread {
@@ -1620,7 +1712,8 @@ open class MainActivity : Activity() {
                 if (loadVersion != archiveLoadVersion) return@runOnUiThread
                 result.fold(
                     onSuccess = { entries ->
-                        if (currentScreen != Screen.TREE) showTree(archive.parentFile ?: homeDirectory())
+                        if (recordHistory) rememberNavigation()
+                        if (currentScreen != Screen.TREE) showTree(archive.parentFile ?: homeDirectory(), recordHistory = false)
                         activeArchive = archive
                         archiveEntries = entries
                         archiveDirectory = directory
@@ -1628,7 +1721,7 @@ open class MainActivity : Activity() {
                         selectedPaths.clear()
                         pendingCopyPaths.clear()
                         pendingMovePaths.clear()
-                        showArchiveDirectory(directory)
+                        showArchiveDirectory(directory, recordHistory = false)
                     },
                     onFailure = { showOutput("ARCHIVE", "Could not open ${archive.name}:\n${it.message}") }
                 )
@@ -1636,8 +1729,9 @@ open class MainActivity : Activity() {
         }.start()
     }
 
-    private fun showArchiveDirectory(directory: String) {
+    private fun showArchiveDirectory(directory: String, recordHistory: Boolean = true) {
         val archive = activeArchive ?: return
+        if (recordHistory && archiveDirectory != directory) rememberNavigation()
         archiveDirectory = directory
         val children = ArchiveExtractor.children(archiveEntries, directory)
         rightVirtualTitle = archive.name + "!/" + directory
@@ -1661,11 +1755,12 @@ open class MainActivity : Activity() {
         updateSelectionBar()
     }
 
-    private fun closeArchive() {
+    private fun closeArchive(recordHistory: Boolean = true) {
         val parent = activeArchive?.parentFile ?: homeDirectory()
+        if (recordHistory) rememberNavigation()
         selectedPaths.clear()
         clearVirtualCategory()
-        showDirectoryContents(parent)
+        showDirectoryContents(parent, recordHistory = false)
     }
 
     private fun clearArchiveSelection() {
@@ -2395,10 +2490,10 @@ open class MainActivity : Activity() {
         dialog = showDialogPanel(panel, input)
     }
 
-    private fun promptSearch(root: File = homeDirectory(), title: String = "Search") {
+    private fun promptSearch(root: File? = null, title: String = "Search") {
         val panel = dialogPanel(title)
 
-        val path = label(root.absolutePath, max(10, outputTextSizeSp - 2), false)
+        val path = label(root?.absolutePath ?: "All storage", max(10, outputTextSizeSp - 2), false)
         path.gravity = Gravity.CENTER_VERTICAL or Gravity.START
         path.setSingleLine(true)
         path.ellipsize = TextUtils.TruncateAt.START
@@ -2433,35 +2528,52 @@ open class MainActivity : Activity() {
         dialog = showDialogPanel(panel, input)
     }
 
-    private fun runFind(request: SearchRequest, root: File = contentPane().directory) {
+    private fun runFind(request: SearchRequest, root: File? = contentPane().directory, recordHistory: Boolean = true) {
         val label = searchLabel(request)
         if (label.isBlank()) {
             showOutput("FIND", "find: [name] [type] [size>10M] [newer>7d]")
             return
         }
+        val scope = FilesNavigationContract.searchScope(root, storageRoots())
+        val displayRoot = root ?: scope.roots.firstOrNull() ?: homeDirectory()
+        if (scope.roots.isEmpty()) {
+            if (recordHistory) rememberNavigation()
+            showFindRows(label, displayRoot, listOf(FileEntry(null, "No readable storage found. Open File > Storage access.", false)))
+            return
+        }
         val loadVersion = ++findVersion
-        showFindRows(label, root, listOf(FileEntry(null, "Searching for $label...", false)))
+        if (recordHistory) rememberNavigation()
+        showFindRows(label, displayRoot, listOf(FileEntry(null, "Searching for $label...", false)))
         Toast.makeText(this, "Searching...", Toast.LENGTH_SHORT).show()
         Thread {
             val out = ArrayList<FileEntry>()
+            val seen = HashSet<String>()
             var truncated = false
-            for (file in root.walkTopDown().onEnter { showHidden || it == root || !it.name.startsWith(".") }.onFail { _, _ -> }) {
-                if (!showHidden && file.name.startsWith(".")) continue
-                if (out.size >= MAX_ROWS) {
-                    truncated = true
-                    break
-                }
-                if (matchesSearch(file, request)) {
-                    out.add(FileEntry(file, file.name, file.isDirectory))
+            var inaccessible = scope.skippedRoots
+            search@ for (scopeRoot in scope.roots) {
+                for (file in scopeRoot.walkTopDown()
+                    .onEnter { showHidden || it == scopeRoot || !it.name.startsWith(".") }
+                    .onFail { _, _ -> inaccessible++ }) {
+                    if (!showHidden && file.name.startsWith(".")) continue
+                    if (out.size >= MAX_ROWS) {
+                        truncated = true
+                        break@search
+                    }
+                    val path = runCatching { file.canonicalPath }.getOrNull() ?: file.absolutePath
+                    if (seen.add(path) && matchesSearch(file, request)) {
+                        out.add(FileEntry(file, file.name, file.isDirectory))
+                    }
                 }
             }
             runOnUiThread {
                 if (loadVersion == findVersion) {
+                    val rows = if (out.isEmpty()) arrayListOf(FileEntry(null, "No matches for $label", false)) else out
+                    if (truncated) rows.add(FileEntry(null, "Showing first $MAX_ROWS matches. Refine the search.", false))
+                    if (inaccessible > 0) rows.add(FileEntry(null, "Some storage or folders were unreadable, so results may be incomplete.", false))
                     showFindRows(
                         label,
-                        root,
-                        if (out.isEmpty()) listOf(FileEntry(null, "No matches for $label", false))
-                        else out.apply { if (truncated) add(FileEntry(null, "Showing first $MAX_ROWS matches. Refine the search.", false)) }
+                        displayRoot,
+                        rows
                     )
                 }
             }
@@ -2707,14 +2819,14 @@ open class MainActivity : Activity() {
             host.removeView(view)
             host.getChildAt(0)?.visibility = View.VISIBLE
             paneDialog = null
-            if (returnHome) showHome() else updateSelectionBar()
+            if (returnHome) showHome(recordHistory = false) else updateSelectionBar()
         }
     }
 
     private fun showDialogPanel(panel: View, focus: View? = null): PaneDialog {
         paneDialog?.dismiss()
         val returnHome = currentScreen == Screen.HOME
-        if (returnHome) showTree(rightPane.directory)
+        if (returnHome) showTree(rightPane.directory, recordHistory = false)
         val host = requireNotNull(rightWorkspace)
         val background = outputPanelColor or 0xff000000.toInt()
         val foreground = outputTextColor or 0xff000000.toInt()
@@ -3513,8 +3625,13 @@ open class MainActivity : Activity() {
     }
 
     private fun uriFor(file: File): Uri? {
+        val allowedRoots = storageRoots() + listOf(filesDir, cacheDir)
+        if (!FilesNavigationContract.isWithin(file, allowedRoots)) {
+            showOutput("FILE", "Could not share file URI:\nOutside configured storage roots: ${file.absolutePath}")
+            return null
+        }
         return try {
-            FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            FileProvider.getUriForFile(this, "$packageName.fileprovider", file.canonicalFile)
         } catch (e: Exception) {
             showOutput("FILE", "Could not share file URI:\n${e.message}")
             null
@@ -3625,8 +3742,8 @@ open class MainActivity : Activity() {
         if (requestCode != 7) return
         if (hasStorageAccess()) {
             paneDialog?.dismiss()
-            if (currentScreen == Screen.HOME) showHome()
-            else activeCategory?.let(::showCategoryFiles) ?: reloadAll()
+            if (currentScreen == Screen.HOME) showHome(recordHistory = false)
+            else activeCategory?.let { showCategoryFiles(it, recordHistory = false) } ?: reloadAll()
         } else {
             showStorageProblem(rightPane.directory)
         }
@@ -4365,6 +4482,7 @@ open class MainActivity : Activity() {
         private const val PREF_TRASH_RETENTION_INITIALIZED = "trash_retention_initialized"
         private const val PREF_LAST_TRASH_CLEANUP = "last_trash_cleanup"
         private const val PREF_WALKTHROUGH_COMPLETE = "walkthrough_complete"
+        private const val PREF_RIGHT_SORT_MODE = "right_sort_mode"
         private const val PREF_FONT_SCALE_OFFSET = "font_scale_offset"
         private const val PREF_FONT_MODE = "font_override_mode"
         private const val PREF_CUSTOM_FONT_PATH = "custom_font_path"

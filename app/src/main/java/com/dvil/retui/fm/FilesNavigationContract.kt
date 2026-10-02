@@ -4,6 +4,29 @@ import java.io.File
 
 internal object FilesNavigationContract {
     data class Entry(val name: String, val path: String, val isDirectory: Boolean)
+    data class SearchScope(val roots: List<File>, val skippedRoots: Int)
+
+    fun searchScope(explicitRoot: File?, discoveredRoots: List<File>): SearchScope {
+        val roots = LinkedHashMap<String, File>()
+        var skipped = 0
+        for (candidate in explicitRoot?.let(::listOf) ?: discoveredRoots) {
+            val root = runCatching { candidate.canonicalFile }.getOrNull()
+            if (root == null || !root.isDirectory || !root.canRead()) {
+                skipped++
+            } else {
+                roots.putIfAbsent(root.path, root)
+            }
+        }
+        return SearchScope(roots.values.toList(), skipped)
+    }
+
+    fun isWithin(file: File, roots: List<File>): Boolean {
+        val path = runCatching { file.canonicalPath }.getOrNull() ?: return false
+        return roots.any { root ->
+            val rootPath = runCatching { root.canonicalPath }.getOrNull() ?: return@any false
+            path == rootPath || path.startsWith(rootPath.trimEnd(File.separatorChar) + File.separator)
+        }
+    }
 
     fun resolve(basePath: String, target: String): File {
         val requested = File(target)
