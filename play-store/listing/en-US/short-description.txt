@@ -1,0 +1,1 @@
+Local-first dual-pane file manager with search, previews, ZIP and safe trash.

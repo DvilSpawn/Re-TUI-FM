@@ -1,0 +1,11 @@
+Re:T-UI Files is a local-first dual-pane file manager for Android. Places stay visible on the left while you browse folder contents on the right, making it easier to move around phone storage and Android-exposed SD cards or USB storage.
+
+Find files by name or type, with optional size and modified-date filters. Preview common files, edit small text files, create and browse ZIP archives, and extract selected archive contents.
+
+Copy and move operations show progress, support cancellation, and let you choose how to handle existing destinations. Use Trash for recoverable deletion and restore items when needed.
+
+Sharing and APK opening happen only when you choose them, through Android's standard app chooser and installer. Re:T-UI Files does not silently install apps.
+
+Your files are processed locally. Re:T-UI Files has no accounts, ads, analytics, cloud upload, or automatic file transmission.
+
+As a general-purpose file manager, Re:T-UI Files needs broad storage access so it can browse, search, copy, move, archive, restore, and delete files across shared storage without making you approve each file or folder separately. Android controls this permission, and file operations start only after you choose them.

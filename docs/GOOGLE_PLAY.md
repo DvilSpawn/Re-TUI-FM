@@ -46,6 +46,8 @@ Re-check these answers before every submission if analytics, networking, cloud b
 
 The store description and screenshots must prominently show that Re:T-UI Files is a general-purpose file manager. Mention broad file navigation and user-initiated APK opening so the restricted permissions match the advertised core functionality.
 
+The English title, descriptions, screenshot order, captions, and alt text live under `play-store/listing/en-US/`. Validate the prepared assets with `python3 scripts/validate_play_assets.py` before Console upload.
+
 ## Console-only gates
 
 - Publish `docs/privacy.html` at a stable public HTTPS URL and enter that URL in Play Console.

@@ -1,0 +1,65 @@
+{
+  "phone": [
+    {
+      "file": "../../screenshots/phone/01-home.png",
+      "caption": "Your files, organised locally",
+      "alt": "Re:T-UI Files home screen with local file categories and Places navigation."
+    },
+    {
+      "file": "../../screenshots/phone/02-browser.png",
+      "caption": "Dual-pane navigation",
+      "alt": "Dual-pane browser with Places on the left and synthetic project folders on the right."
+    },
+    {
+      "file": "../../screenshots/phone/03-search.png",
+      "caption": "Find by name, type, size or date",
+      "alt": "Search results for synthetic files using type, size, and modified-date filters."
+    },
+    {
+      "file": "../../screenshots/phone/04-transfer.png",
+      "caption": "Progress, cancellation and conflict control",
+      "alt": "Copy progress in the right pane with a cancel control and the left pane still visible."
+    },
+    {
+      "file": "../../screenshots/phone/05-archives.png",
+      "caption": "Preview, share and work with ZIP files",
+      "alt": "A synthetic ZIP archive open in Re:T-UI Files with preview and file actions available."
+    }
+  ],
+  "7-inch-tablet": [
+    {
+      "file": "../../screenshots/7-inch-tablet/01-home.png",
+      "alt": "Tablet home screen showing local categories and Places in the dual-pane layout."
+    },
+    {
+      "file": "../../screenshots/7-inch-tablet/02-browser.png",
+      "alt": "Tablet browser showing synthetic folders beside persistent Places navigation."
+    },
+    {
+      "file": "../../screenshots/7-inch-tablet/03-selection-transfer.png",
+      "alt": "Tablet selection and transfer controls with several synthetic files selected."
+    },
+    {
+      "file": "../../screenshots/7-inch-tablet/04-search-archive.png",
+      "alt": "Tablet search and archive view using synthetic project files."
+    }
+  ],
+  "10-inch-tablet": [
+    {
+      "file": "../../screenshots/10-inch-tablet/01-home.png",
+      "alt": "Large tablet home screen showing local categories and Places in the dual-pane layout."
+    },
+    {
+      "file": "../../screenshots/10-inch-tablet/02-browser.png",
+      "alt": "Large tablet browser showing synthetic folders and files in the adaptive grid."
+    },
+    {
+      "file": "../../screenshots/10-inch-tablet/03-selection-transfer.png",
+      "alt": "Large tablet selection and transfer controls with synthetic files selected."
+    },
+    {
+      "file": "../../screenshots/10-inch-tablet/04-search-archive.png",
+      "alt": "Large tablet search and ZIP archive view using synthetic project files."
+    }
+  ]
+}
