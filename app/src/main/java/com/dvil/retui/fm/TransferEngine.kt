@@ -3,16 +3,25 @@ package com.dvil.retui.fm
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.UUID
 
 internal enum class ConflictChoice { KEEP_BOTH, REPLACE, SKIP }
 
-internal data class TransferProgress(val current: String, val completed: Int, val total: Int)
+internal data class TransferProgress(
+    val current: String,
+    val completed: Int,
+    val total: Int,
+    val completedBytes: Long = 0L,
+    val totalBytes: Long = 0L
+)
 
 internal data class TransferReport(
     val completed: Int,
     val skipped: Int,
     val failures: List<String>,
-    val cancelled: Boolean
+    val cancelled: Boolean,
+    val completedBytes: Long = 0L,
+    val totalBytes: Long = 0L
 )
 
 internal object TransferEngine {
@@ -27,9 +36,16 @@ internal object TransferEngine {
         var completed = 0
         var skipped = 0
         val failures = ArrayList<String>()
+        val totalBytes = sources.sumOf(::sizeOf)
+        require(destination.exists() || destination.mkdirs()) { "Could not create destination ${destination.absolutePath}" }
+        require(destination.isDirectory && destination.canWrite()) { "Destination is not writable: ${destination.absolutePath}" }
+        if (totalBytes > 0L && destination.freeSpace in 1 until totalBytes) {
+            throw IllegalStateException("Not enough free space for the transfer")
+        }
+        var completedBytes = 0L
         for ((index, source) in sources.withIndex()) {
             if (cancelled()) break
-            progress(TransferProgress(source.name, completed, sources.size))
+            progress(TransferProgress(source.name, completed, sources.size, completedBytes, totalBytes))
             try {
                 require(source.exists()) { "${source.name}: no longer exists" }
                 val sourcePath = source.canonicalPath
@@ -51,30 +67,34 @@ internal object TransferEngine {
                         }
                     }
                 }
+                val temporary = temporarySibling(target)
                 try {
-                    if (!move || !source.renameTo(target)) {
-                        copyRecursively(source, target, cancelled)
-                        if (move && !(if (source.isDirectory) source.deleteRecursively() else source.delete())) {
-                            throw IllegalStateException("${source.name}: copied, but the source could not be removed")
-                        }
+                    copyRecursively(source, temporary, cancelled)
+                    if (!temporary.renameTo(target)) {
+                        throw IllegalStateException("${source.name}: could not publish destination")
+                    }
+                    if (move && !(if (source.isDirectory) source.deleteRecursively() else source.delete())) {
+                        throw IllegalStateException("${source.name}: copied, but the source could not be removed")
                     }
                     if (replacementBackup != null && !replacementBackup.deleteRecursively()) {
                         throw IllegalStateException("${source.name}: could not finalize replacement")
                     }
                 } catch (failure: Exception) {
+                    temporary.deleteRecursively()
                     target.deleteRecursively()
                     replacementBackup?.renameTo(File(destination, source.name))
                     throw failure
                 }
+                completedBytes += sizeOf(source)
                 completed++
-                progress(TransferProgress(source.name, completed, sources.size))
+                progress(TransferProgress(source.name, completed, sources.size, completedBytes, totalBytes))
             } catch (failure: TransferCancelled) {
                 break
             } catch (failure: Exception) {
                 failures += (failure.message ?: source.name)
             }
         }
-        return TransferReport(completed, skipped, failures, cancelled())
+        return TransferReport(completed, skipped, failures, cancelled(), completedBytes, totalBytes)
     }
 
     private fun copyRecursively(source: File, target: File, cancelled: () -> Boolean) {
@@ -103,6 +123,15 @@ internal object TransferEngine {
         var suffix = 1
         while (target.exists()) target = File(base.parentFile, "${base.name}.$suffix").also { suffix++ }
         return target
+    }
+
+    private fun temporarySibling(target: File): File {
+        return File(target.parentFile, ".${target.name}.retui-tmp-${UUID.randomUUID()}")
+    }
+
+    private fun sizeOf(file: File): Long {
+        if (file.isFile) return file.length().coerceAtLeast(0L)
+        return file.listFiles().orEmpty().sumOf(::sizeOf)
     }
 
     private class TransferCancelled : Exception()

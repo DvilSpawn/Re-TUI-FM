@@ -13,6 +13,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.OutputStream
 import java.util.Locale
+import java.util.UUID
 import java.util.zip.ZipFile
 
 internal object ArchiveExtractor {
@@ -61,25 +62,61 @@ internal object ArchiveExtractor {
         return uniqueChild(parent, stem, true)
     }
 
-    fun extractNamed(archive: File, selected: Set<String> = emptySet()): File {
-        val destination = reserveNamedDestination(archive)
+    fun extractNamed(
+        archive: File,
+        selected: Set<String> = emptySet(),
+        isCancelled: () -> Boolean = { false },
+        progress: (String, Int, Int) -> Unit = { _, _, _ -> }
+    ): File {
+        val destination = destinationFor(archive)
+        val staging = temporarySibling(destination)
+        if (!staging.mkdir()) throw IOException("Could not create temporary extraction folder")
+        val total = runCatching { entries(archive).size }.getOrElse { staging.deleteRecursively(); throw it }
+        var completed = 0
         try {
-            extractInto(archive, destination, selected, preserveArchivePaths = true)
+            extractInto(archive, staging, selected, preserveArchivePaths = true, isCancelled = isCancelled) { current, _, _ ->
+                completed++
+                progress(current, completed, total)
+            }
+            check(!isCancelled()) { "Operation cancelled" }
+            if (!staging.renameTo(destination)) throw IOException("Could not publish ${destination.name}")
             return destination
         } catch (failure: Exception) {
-            destination.deleteRecursively()
+            staging.deleteRecursively()
             throw failure
         }
     }
 
-    fun extractTo(archive: File, destination: File, selected: Set<String> = emptySet()): List<File> {
+    fun extractTo(
+        archive: File,
+        destination: File,
+        selected: Set<String> = emptySet(),
+        isCancelled: () -> Boolean = { false },
+        progress: (String, Int, Int) -> Unit = { _, _, _ -> }
+    ): List<File> {
         require(destination.isDirectory) { "Not a folder: ${destination.absolutePath}" }
-        val created = ArrayList<File>()
+        val staging = File(destination, ".retui-extract-${UUID.randomUUID()}")
+        if (!staging.mkdir()) throw IOException("Could not create temporary extraction folder")
+        val staged = ArrayList<File>()
+        val published = ArrayList<File>()
+        val total = runCatching { entries(archive).size }.getOrElse { staging.deleteRecursively(); throw it }
+        var completed = 0
         try {
-            extractInto(archive, destination, selected, preserveArchivePaths = false, createdRoots = created)
-            return created
+            extractInto(archive, staging, selected, preserveArchivePaths = false, createdRoots = staged, isCancelled = isCancelled) { current, _, _ ->
+                completed++
+                progress(current, completed, total)
+            }
+            for (root in staged) {
+                check(!isCancelled()) { "Operation cancelled" }
+                val target = uniqueChild(destination, root.name, root.isDirectory)
+                if (!root.renameTo(target)) throw IOException("Could not publish ${root.name}")
+                published += target
+            }
+            staging.deleteRecursively()
+            return published
         } catch (failure: Exception) {
-            created.forEach { if (it.isDirectory) it.deleteRecursively() else it.delete() }
+            staging.deleteRecursively()
+            published.forEach { it.deleteRecursively() }
             throw failure
         }
     }
@@ -89,16 +126,20 @@ internal object ArchiveExtractor {
         destination: File,
         selected: Set<String>,
         preserveArchivePaths: Boolean,
-        createdRoots: MutableList<File> = ArrayList()
+        createdRoots: MutableList<File> = ArrayList(),
+        isCancelled: () -> Boolean = { false },
+        progress: (String, Int, Int) -> Unit = { _, _, _ -> }
     ) {
         val roots = selectionRoots(selected)
         val mappedRoots = HashMap<String, File>()
         val budget = ExtractionBudget()
         var extracted = 0
         scan(archive) { entry, copy ->
+            check(!isCancelled()) { "Operation cancelled" }
             val selectedRoot = roots.firstOrNull { entry.path == it || entry.path.startsWith("$it/") }
             if (roots.isNotEmpty() && selectedRoot == null) return@scan
             if (++extracted > MAX_ENTRIES) throw IOException("Archive contains more than $MAX_ENTRIES entries")
+            progress(entry.path, extracted, 0)
 
             val outputPath = if (preserveArchivePaths) {
                 entry.path
@@ -123,7 +164,7 @@ internal object ArchiveExtractor {
                 val parent = target.parentFile ?: throw IOException("Invalid archive path: ${entry.path}")
                 if (!parent.isDirectory && !parent.mkdirs()) throw IOException("Could not create ${parent.name}")
                 FileOutputStream(target).use { output ->
-                    copy(BudgetOutputStream(output, budget))
+                    copy(BudgetOutputStream(output, budget, isCancelled))
                 }
             }
         }
@@ -196,14 +237,6 @@ internal object ArchiveExtractor {
         return TarArchiveInputStream(decompressed)
     }
 
-    private fun reserveNamedDestination(archive: File): File {
-        while (true) {
-            val destination = destinationFor(archive)
-            if (destination.mkdir()) return destination
-            if (!destination.exists()) throw IOException("Could not create ${destination.name}")
-        }
-    }
-
     private fun safeTarget(destination: File, entryName: String): File {
         val root = destination.canonicalFile
         val target = File(root, entryName).canonicalFile
@@ -235,11 +268,15 @@ internal object ArchiveExtractor {
         return suffixes.firstOrNull(lower::endsWith)
     }
 
+    private fun temporarySibling(target: File): File =
+        File(target.parentFile, ".${target.name}.retui-extract-${UUID.randomUUID()}")
+
     private class ExtractionBudget(var bytes: Long = 0)
 
     private class BudgetOutputStream(
         private val delegate: OutputStream,
-        private val budget: ExtractionBudget
+        private val budget: ExtractionBudget,
+        private val isCancelled: () -> Boolean
     ) : OutputStream() {
         override fun write(value: Int) {
             add(1)
@@ -252,6 +289,7 @@ internal object ArchiveExtractor {
         }
 
         private fun add(bytes: Int) {
+            if (isCancelled()) throw IOException("Operation cancelled")
             budget.bytes += bytes
             if (budget.bytes > MAX_EXTRACTED_BYTES) throw IOException("Archive expands beyond the 4 GB safety limit")
         }

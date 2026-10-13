@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="fm_menu_file" type="id" />
+    <item name="fm_menu_edit" type="id" />
+    <item name="fm_menu_view" type="id" />
+    <item name="fm_menu_go" type="id" />
+    <item name="fm_menu_places" type="id" />
+    <item name="fm_menu_help" type="id" />
+    <item name="fm_address_bar" type="id" />
+    <item name="fm_breadcrumb_segment" type="id" />
+    <item name="fm_go_parent" type="id" />
+    <item name="fm_go_home" type="id" />
+    <item name="fm_new_folder" type="id" />
+    <item name="fm_refresh" type="id" />
+    <item name="fm_command_button" type="id" />
+    <item name="fm_search_root" type="id" />
+    <item name="fm_search_query" type="id" />
+    <item name="fm_selection_bar" type="id" />
+    <item name="fm_file_row" type="id" />
+    <item name="fm_grid_cell" type="id" />
+    <item name="fm_dialog_button" type="id" />
+</resources>

@@ -78,7 +78,8 @@ class FmEditorActivity : Activity() {
             return
         }
         file = File(path!!).absoluteFile
-        if (file == null || !file!!.exists() || file!!.isDirectory) {
+        val creating = intent?.getBooleanExtra(MainActivity.EXTRA_CREATE, false) == true
+        if (file == null || (!file!!.exists() && !creating) || file!!.isDirectory || file!!.parentFile?.isDirectory != true) {
             Toast.makeText(this, "File is not editable.", Toast.LENGTH_SHORT).show()
             finish()
             return
@@ -89,7 +90,7 @@ class FmEditorActivity : Activity() {
             return
         }
 
-        originalText = readFileText(file!!)
+        originalText = if (file!!.exists()) readFileText(file!!) else ""
         setContentView(buildUi())
     }
 

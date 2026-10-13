@@ -102,4 +102,32 @@ class ArchiveExtractorTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun cancelledExtractionCleansTemporaryAndPublishedOutputs() {
+        val root = Files.createTempDirectory("archive-cancel").toFile()
+        try {
+            val archive = File(root, "cancel.zip")
+            ZipOutputStream(FileOutputStream(archive)).use { zip ->
+                zip.putNextEntry(ZipEntry("folder/one.txt"))
+                zip.write("one".toByteArray())
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("folder/two.txt"))
+                zip.write("two".toByteArray())
+                zip.closeEntry()
+            }
+            var cancelled = false
+            assertThrows(Exception::class.java) {
+                ArchiveExtractor.extractNamed(
+                    archive,
+                    isCancelled = { cancelled },
+                    progress = { _, count, _ -> if (count >= 1) cancelled = true }
+                )
+            }
+            assertFalse(File(root, "cancel").exists())
+            assertTrue(root.listFiles().orEmpty().none { it.name.contains("retui-extract") })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
 }

@@ -79,9 +79,9 @@ item_selected() {
   [[ $xml =~ text=\"$expected\"[^\>]*selected=\"$state\" ]]
 }
 
-serial=$($ADB_BIN devices | awk '$2 == "device" && $1 ~ /^emulator-/ { print $1; exit }')
+serial=${SERIAL:-$($ADB_BIN devices | awk '$2 == "device" && $1 ~ /^emulator-/ { print $1; exit }')}
 if [[ -z "$serial" ]]; then
-  printf 'No running Android emulator found.\n' >&2
+  printf 'No suitable Android device found. Set SERIAL to run against a physical device.\n' >&2
   exit 2
 fi
 adb() { command "$ADB_BIN" -s "$serial" "$@"; }
@@ -236,13 +236,16 @@ adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 >/dev/null
 sleep 2
 if tap_text APKs; then
   sleep 3
+  visible_apk=$(ui_text | grep -o 'text="[^"]*\.apk"' | head -1 | sed 's/^text="//; s/"$//')
+else
+  visible_apk=""
 fi
-if [[ $(ui_text) == *return-test.apk* ]]; then
+if [[ -n "$visible_apk" ]]; then
   adb shell am start -a android.settings.SETTINGS >/dev/null
   sleep 1
   adb shell am force-stop com.android.settings
   sleep 2
-  expect_ui 'returning from Android opener keeps the APK category' 'return-test.apk'
+  expect_ui 'returning from Android opener keeps the APK category' "$visible_apk"
 else
   fail 'returning from Android opener keeps the APK category' 'could not open the APK category item'
 fi
