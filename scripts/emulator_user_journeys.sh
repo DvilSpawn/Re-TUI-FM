@@ -4,7 +4,7 @@ set -u
 ADB_BIN=${ADB:-adb}
 PACKAGE=com.dvil.retui.fm
 ACTION=com.dvil.retui.fm.OPEN_CONSOLE
-ROOT=/sdcard/Download/retui-fm-test
+ROOT=${ROOT:-/sdcard/Download/retui-fm-test}
 passed=0
 failed=0
 
@@ -40,14 +40,26 @@ expect_ui() {
 }
 
 tap_text() {
-  local expected=$1 xml x1 y1 x2 y2
-  xml=$(ui_text)
-  if [[ $xml =~ text=\"$expected\"[^\>]*bounds=\"\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]\" ]]; then
-    x1=${BASH_REMATCH[1]}; y1=${BASH_REMATCH[2]}; x2=${BASH_REMATCH[3]}; y2=${BASH_REMATCH[4]}
-    adb shell input tap $(((x1 + x2) / 2)) $(((y1 + y2) / 2))
-    sleep 1
-    return 0
-  fi
+  local expected=$1 xml x1 y1 x2 y2 attempt
+  for attempt in 1 2 3; do
+    xml=$(ui_text)
+    if [[ $xml =~ text=\"$expected\"[^\>]*bounds=\"\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]\" ]]; then
+      x1=${BASH_REMATCH[1]}; y1=${BASH_REMATCH[2]}; x2=${BASH_REMATCH[3]}; y2=${BASH_REMATCH[4]}
+      adb shell input tap $(((x1 + x2) / 2)) $(((y1 + y2) / 2))
+      sleep 1
+      return 0
+    fi
+    # Batch actions scroll horizontally so each action keeps its touch target.
+    if [[ $xml =~ resource-id=\"com.dvil.retui.fm:id/fm_selection_bar\"[^\>]*bounds=\"\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]\" ]]; then
+      y1=${BASH_REMATCH[2]}; y2=${BASH_REMATCH[4]}
+      local width
+      width=$(adb shell wm size | tail -1 | sed 's/.*: //; s/x.*//; s/[^0-9]//g')
+      adb shell input swipe $((width * 4 / 5)) $(((y1 + y2) / 2)) $((width / 5)) $(((y1 + y2) / 2)) 300
+      sleep 1
+    else
+      break
+    fi
+  done
   return 1
 }
 
@@ -150,22 +162,25 @@ else
 fi
 
 launch_action open "$ROOT/scroll"
-before=$(item_top item-10.txt || true)
-if long_press_text item-10.txt; then
-  after_first=$(item_top item-10.txt || true)
+visible_items=$(ui_text | grep -o 'text="item-[0-9][0-9]\.txt"' | sed 's/^text="//; s/"$//')
+anchor_item=$(printf '%s\n' "$visible_items" | head -1)
+next_item=$(printf '%s\n' "$visible_items" | sed -n '2p')
+before=$(item_top "$anchor_item" || true)
+if long_press_text "$anchor_item"; then
+  after_first=$(item_top "$anchor_item" || true)
   if [[ -z "$before" || "$before" != "$after_first" ]]; then
     fail 'first selection keeps the right pane anchored' "item moved from y=$before to y=$after_first"
   else
     pass 'first selection keeps the right pane anchored'
   fi
-  if tap_text item-11.txt; then
-    after=$(item_top item-10.txt || true)
+  if tap_text "$next_item"; then
+    after=$(item_top "$anchor_item" || true)
     if [[ -n "$after_first" && "$after_first" == "$after" ]]; then
       pass 'additional selection keeps the right pane anchored'
     else
       fail 'additional selection keeps the right pane anchored' "item moved from y=$after_first to y=$after"
     fi
-    if tap_text X && item_selected item-10.txt false && item_selected item-11.txt false; then
+    if tap_text X && item_selected "$anchor_item" false && item_selected "$next_item" false; then
       pass 'closing selection clears every item highlight'
     else
       fail 'closing selection clears every item highlight' 'an item remained visually selected'
@@ -234,6 +249,7 @@ fi
 adb shell am force-stop "$PACKAGE" >/dev/null
 adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 >/dev/null
 sleep 2
+tap_text Command && tap_text 'Categories and storage'
 if tap_text APKs; then
   sleep 3
   visible_apk=$(ui_text | grep -o 'text="[^"]*\.apk"' | head -1 | sed 's/^text="//; s/"$//')

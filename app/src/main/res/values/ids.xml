@@ -19,4 +19,10 @@
     <item name="fm_file_row" type="id" />
     <item name="fm_grid_cell" type="id" />
     <item name="fm_dialog_button" type="id" />
+    <item name="fm_menu_left" type="id" />
+    <item name="fm_menu_right" type="id" />
+    <item name="fm_menu_command" type="id" />
+    <item name="fm_menu_options" type="id" />
+    <item name="fm_function_bar" type="id" />
+    <item name="fm_file_list" type="id" />
 </resources>

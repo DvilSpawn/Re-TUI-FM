@@ -64,26 +64,29 @@ internal class SafStorageBackend(
     val rootUri: Uri
 ) : StorageBackend {
     override val id: String = rootUri.toString()
-    override val displayName: String = context.contentResolver.query(
-        rootUri,
-        arrayOf(OpenableColumns.DISPLAY_NAME),
-        null,
-        null,
-        null
-    )?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null } ?: "Provider storage"
-    override val capabilities: StorageCapabilities = capabilitiesFor(rootUri)
+    // A persisted tree grants access; providers query the document inside that tree.
+    private val rootDocumentUri = runCatching {
+        DocumentsContract.buildDocumentUriUsingTree(rootUri, DocumentsContract.getTreeDocumentId(rootUri))
+    }.getOrDefault(rootUri)
+    private fun documentUri(uri: Uri): Uri = if (uri == rootUri) rootDocumentUri else uri
+
+    override val displayName: String = runCatching {
+        context.contentResolver.query(rootDocumentUri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+    }.getOrNull()?.takeIf { it.isNotBlank() } ?: "Provider storage"
+    override val capabilities: StorageCapabilities = capabilitiesFor(rootDocumentUri)
 
     internal fun capabilitiesFor(document: Uri): StorageCapabilities = runCatching {
         val projection = arrayOf(DocumentsContract.Document.COLUMN_FLAGS)
-        context.contentResolver.query(document, projection, null, null, null)?.use { cursor ->
+        context.contentResolver.query(documentUri(document), projection, null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) capabilitiesFor(cursor.getLong(0)) else StorageCapabilities()
         } ?: StorageCapabilities()
     }.getOrDefault(StorageCapabilities())
 
     override fun list(parent: Uri): List<StorageItem> {
-        val documentId = DocumentsContract.getDocumentId(parent)
-        val children = DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, documentId)
         return runCatching {
+            val documentId = DocumentsContract.getDocumentId(documentUri(parent))
+            val children = DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, documentId)
             context.contentResolver.query(
                 children,
                 arrayOf(
@@ -119,14 +122,14 @@ internal class SafStorageBackend(
 
     override fun createDirectory(parent: Uri, name: String): Uri? = DocumentsContract.createDocument(
         context.contentResolver,
-        parent,
+        documentUri(parent),
         DocumentsContract.Document.MIME_TYPE_DIR,
         name
     )
 
     override fun createFile(parent: Uri, name: String, mimeType: String): Uri? = DocumentsContract.createDocument(
         context.contentResolver,
-        parent,
+        documentUri(parent),
         mimeType,
         name
     )
@@ -163,11 +166,12 @@ internal class SafStorageBackend(
     }
 
     fun parent(item: Uri): Uri? {
-        if (item == rootUri) return null
-        val id = DocumentsContract.getDocumentId(item)
-        val parentId = id.substringBeforeLast('/', "")
-        if (parentId.isBlank()) return rootUri
-        return DocumentsContract.buildDocumentUriUsingTree(rootUri, parentId)
+        if (item == rootUri || item == rootDocumentUri) return null
+        return runCatching {
+            val id = DocumentsContract.getDocumentId(item)
+            val parentId = id.substringBeforeLast('/', "")
+            if (parentId.isBlank()) rootUri else DocumentsContract.buildDocumentUriUsingTree(rootUri, parentId)
+        }.getOrNull()
     }
 
     private fun capabilitiesFor(flags: Long): StorageCapabilities = StorageCapabilities(

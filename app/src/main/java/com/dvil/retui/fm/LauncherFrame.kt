@@ -290,6 +290,8 @@ internal class LauncherFrameStore(private val context: Context) {
 
 internal class FilesFrameRuntime private constructor(private val asset: LauncherFrameAsset?) {
     val textColor: Int? = asset?.textColor
+    val active: Boolean get() = asset != null
+    val borderInsets: IntArray get() = asset?.borderInsets ?: intArrayOf(0, 0, 0, 0)
 
     fun drawable(fallback: Drawable, interactive: Boolean = false): Drawable = asset?.drawable()?.let {
         val layered = LayerDrawable(arrayOf(fallback, it))
@@ -340,6 +342,8 @@ private class StatefulFrameDrawable(private val frame: Drawable) : Drawable() {
 internal class LauncherFrameAsset(bitmap: Bitmap, private val spec: LauncherFrameSpec, private val density: Float) {
     private val parts = FrameParts(bitmap, spec)
     val textColor = frameTextColor(parts.center)
+    val borderInsets = floatArrayOf(spec.borderLeftDp, spec.borderTopDp, spec.borderRightDp, spec.borderBottomDp)
+        .map { (it * density).roundToInt() }.toIntArray()
 
     fun drawable(): Drawable = LauncherFrameDrawable(parts, spec, density)
 }

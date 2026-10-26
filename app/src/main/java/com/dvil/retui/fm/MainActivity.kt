@@ -1,5 +1,9 @@
 package com.dvil.retui.fm
 
+import com.dvil.retui.fm.terminal.TerminalLabelView
+import com.dvil.retui.fm.terminal.CommanderSkin
+import com.dvil.retui.fm.terminal.CommanderStyle
+import com.dvil.retui.fm.terminal.CommanderFrameDrawable
 import android.Manifest
 import com.dvil.retui.contract.RetuiVisualContract
 import android.app.Activity
@@ -44,7 +48,7 @@ import android.widget.AbsListView
 import android.widget.BaseAdapter
 import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.GridView
+import android.widget.ListView
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -67,6 +71,12 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 open class MainActivity : Activity() {
+    private val commanderSkins by lazy {
+        assets.list("mc-skins").orEmpty().filter { it.endsWith(".ini") }.sorted().map { filename ->
+            assets.open("mc-skins/$filename").bufferedReader().use { CommanderSkin.parse(filename.removeSuffix(".ini"), it.readText()) }
+        }
+    }
+    private var commanderSkin: CommanderSkin? = null
     private enum class Panel { LEFT, RIGHT }
     private enum class Screen { HOME, TREE }
     private enum class SortMode { NAME_ASC, NAME_DESC, MODIFIED_NEWEST, MODIFIED_OLDEST, SIZE_LARGEST, SIZE_SMALLEST, TYPE }
@@ -137,22 +147,28 @@ open class MainActivity : Activity() {
     private var mainContainer: LinearLayout? = null
     private var leftRowsView: LinearLayout? = null
     private var leftScrollView: ScrollView? = null
-    private var rightGridView: GridView? = null
-    private var rightGridAdapter: BaseAdapter? = null
-    private var rightNameSortView: ImageView? = null
-    private var rightModifiedSortView: ImageView? = null
+    private var rightListView: ListView? = null
+    private var rightListAdapter: BaseAdapter? = null
+    private var rightNameSortView: TextView? = null
+    private var rightModifiedSortView: TextView? = null
     private var rightWorkspace: FrameLayout? = null
     @Volatile private var paneDialog: PaneDialog? = null
+    private var appearanceReturnForm: PaneDialog? = null
+    private var tappedLeftEntry: String? = null
+    private var pendingPaneRelayout = false
+    private var leftTitleView: TextView? = null
+    private var rightTitleView: TextView? = null
+    private var functionBar: LinearLayout? = null
+    private var commandLineView: TextView? = null
     private var showHidden = false
     private var contentHost: FrameLayout? = null
     private var leftFooterView: TextView? = null
     private var rightFooterView: TextView? = null
     private var leftDiskView: TextView? = null
     private var rightDiskView: TextView? = null
-    private var addressPathView: TextView? = null
-    private var breadcrumbScroll: HorizontalScrollView? = null
-    private var breadcrumbBar: LinearLayout? = null
-    private var selectionBar: LinearLayout? = null
+        private var selectionBar: LinearLayout? = null
+    private var selectionScrollView: HorizontalScrollView? = null
+    private var selectionSurface: LinearLayout? = null
     private val selectedPaths = LinkedHashSet<String>()
     private val pendingCopyPaths = ArrayList<String>()
     private var pendingApkPath: String? = null
@@ -229,24 +245,24 @@ open class MainActivity : Activity() {
     }
 
     private var bgColor = Color.rgb(14, 14, 16)
-    private var panelColor = Color.rgb(21, 23, 23)
-    private var textColor = Color.rgb(205, 136, 146)
-    private var borderColor = Color.rgb(126, 70, 78)
+    private var panelColor = Color.rgb(55, 55, 55)
+    private var textColor = Color.rgb(200, 196, 151)
+    private var borderColor = Color.rgb(170, 170, 170)
     private var inputBgColor = Color.TRANSPARENT
     private var inputTextColor = textColor
     private var outputPanelColor = panelColor
     private var outputTextColor = textColor
     private var outputBorderColor = borderColor
-    private var fileTextColor = outputTextColor
+    private var fileTextColor = Color.rgb(210, 210, 210)
     private var directoryTextColor = textColor
-    private var selectionBgColor = Color.rgb(3, 169, 244)
+    private var selectionBgColor = Color.rgb(0, 96, 96)
     private var selectionTextColor = Color.WHITE
-    private var modulePanelColor = Color.rgb(55, 28, 34)
+    private var modulePanelColor = Color.rgb(55, 55, 55)
     private var moduleTextColor = textColor
     private var moduleBorderColor = borderColor
-    private var headerPanelColor = Color.rgb(26, 28, 28)
+    private var headerPanelColor = Color.rgb(72, 72, 72)
     private var headerTextColor = textColor
-    private var moduleButtonBgColor = Color.rgb(111, 62, 70)
+    private var moduleButtonBgColor = Color.rgb(72, 72, 72)
     private var moduleButtonTextColor = textColor
     private var moduleButtonBorderColor = borderColor
     private var headerTextSizeSp = 14
@@ -275,9 +291,28 @@ open class MainActivity : Activity() {
     private var iconTypeface: Typeface? = null
     private var firstResume = true
     private var floatingWindow = false
+    private var floatingFullscreen = false
+    private var fullscreenControl: FrameLayout? = null
+    private var fullscreenIcon: TextView? = null
+    private var floatingPanel: FloatingFilesPanel? = null
+    private var floatingHost: FrameLayout? = null
+    private var floatingBounds: FloatingFractions? = null
+    private var keyboardInsetExtra = 0
+    private var legacyFloatingHeight = 0
+    private var legacyFloatingWidth = 0
+    private var workspaceFrame: FrameLayout? = null
+    private var launcherPanelColor = modulePanelColor
+    private var launcherPanelBorderColor = moduleBorderColor
+    private var launcherHeaderColor = headerPanelColor
+    private var launcherHeaderTextColor = headerTextColor
+    private var launcherHeaderTextSizeSp = headerTextSizeSp
+    private var dashedBorders = false
+    private var dashLengthDp = 6
+    private var dashGapDp = 4
+    private var borderStrokeDp = 1.5f
+    private var showModifiedColumn = true
     private var launcherFrameRuntime: FilesFrameRuntime? = null
 
-    private val topTabOverlapDp = 11
     private val filesUri = MediaStore.Files.getContentUri("external")
     private val fileCategories = listOf(
         FileCategory("Images", "", MediaStore.Images.Media.EXTERNAL_CONTENT_URI),
@@ -295,8 +330,15 @@ open class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         LauncherFrameStore(this).process(intent)
         launcherFrameRuntime = FilesFrameRuntime.load(this)
+        floatingFullscreen = themePrefs().getBoolean("floating.fullscreen", false)
         configureWindow()
         applyThemeExtras(intent)
+        if (floatingWindow) {
+            val prefs = themePrefs()
+            fun fraction(key: String, fallback: Float) = if (savedInstanceState?.containsKey("floating.$key") == true)
+                savedInstanceState.getFloat("floating.$key") else prefs.getFloat("floating.$key", fallback)
+            floatingBounds = FloatingFractions(fraction("left", -1f), fraction("top", -1f), fraction("width", -1f), fraction("height", -1f)).takeIf { it.isValid() }
+        }
         configureIncomingMode(intent)
         val start = resolveStartDirectory(intent)
         leftPane = PaneState(start)
@@ -306,7 +348,6 @@ open class MainActivity : Activity() {
         setContentView(buildUi())
         registerOperationReceiver()
         restoreActiveOperation()
-        if (floatingWindow) rootView?.post(::applyFloatingWindowBounds)
         rootView?.requestFocus()
         runTrashCleanup()
         displayIncomingIntent(intent, start)
@@ -330,6 +371,8 @@ open class MainActivity : Activity() {
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         setIntent(intent)
+        paneDialog?.dismiss()
+        appearanceReturnForm = null
         LauncherFrameStore(this).process(intent)
         launcherFrameRuntime = FilesFrameRuntime.load(this)
         selectedPaths.clear()
@@ -384,7 +427,20 @@ open class MainActivity : Activity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        if (floatingWindow) rootView?.post(::applyFloatingWindowBounds)
+        if (currentScreen == Screen.TREE) {
+            if (paneDialog == null) reflowTreePanes() else pendingPaneRelayout = true
+        }
+        floatingPanel?.post { floatingPanel?.fit() }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        floatingBounds?.let { bounds ->
+            outState.putFloat("floating.left", bounds.left)
+            outState.putFloat("floating.top", bounds.top)
+            outState.putFloat("floating.width", bounds.width)
+            outState.putFloat("floating.height", bounds.height)
+        }
+        super.onSaveInstanceState(outState)
     }
 
     override fun onDestroy() {
@@ -412,7 +468,7 @@ open class MainActivity : Activity() {
             cancelOperation(it)
             return
         }
-        paneDialog?.let { it.dismiss(); return }
+        paneDialog?.let { it.dismiss(); restoreAppearanceForm(); return }
         if (selectedPaths.isNotEmpty() || shareSelectionMode) {
             closeShareSelection()
             return
@@ -433,23 +489,9 @@ open class MainActivity : Activity() {
     }
 
     private fun configureWindow() {
-        if (floatingWindow) {
-            val dimAmount = 0.42f
-            val barDim = Color.argb((255 * dimAmount).roundToInt(), 0, 0, 0)
-            window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
-            window.setDimAmount(dimAmount)
-            window.statusBarColor = barDim
-            window.navigationBarColor = barDim
-            window.attributes = window.attributes.apply {
-                gravity = Gravity.CENTER
-                this.dimAmount = dimAmount
-            }
-            return
-        }
         window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        window.setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        window.setDimAmount(0f)
+        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
         window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -460,20 +502,7 @@ open class MainActivity : Activity() {
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
         window.statusBarColor = Color.TRANSPARENT
-        window.navigationBarColor = Color.BLACK
-    }
-
-    private fun applyFloatingWindowBounds() {
-        val metrics = resources.displayMetrics
-        val width = min((metrics.widthPixels * 0.92f).roundToInt(), dp(720)).coerceAtLeast(1)
-        val height = min((metrics.heightPixels * 0.82f).roundToInt(), dp(760)).coerceAtLeast(1)
-        window.attributes = window.attributes.apply {
-            gravity = Gravity.TOP or Gravity.START
-            this.width = width
-            this.height = height
-            x = ((metrics.widthPixels - width) / 2).coerceAtLeast(0)
-            y = ((metrics.heightPixels - height) / 2).coerceAtLeast(0)
-        }
+        window.navigationBarColor = Color.TRANSPARENT
     }
 
     private fun registerOperationReceiver() {
@@ -543,8 +572,7 @@ open class MainActivity : Activity() {
         root.isFocusableInTouchMode = true
         root.clipChildren = false
         root.clipToPadding = false
-        if (floatingWindow) root.setBackgroundColor(Color.TRANSPARENT) else applyWallpaperBackground(root)
-        applyCrtForeground(root)
+        root.setBackgroundColor(Color.TRANSPARENT)
         installWindowInsetsHandler(root)
 
         val main = LinearLayout(this)
@@ -552,23 +580,83 @@ open class MainActivity : Activity() {
         main.orientation = LinearLayout.VERTICAL
         main.clipChildren = false
         main.clipToPadding = false
-        main.setPadding(dp(10), 0, dp(10), dp(10))
-        main.background = panelDrawable(PanelRole.OUTER)
+        main.setPadding(dp(2), 0, dp(2), dp(2))
+        main.setBackgroundColor(outputPanelColor or 0xff000000.toInt())
+        applyCrtForeground(main)
+        val border = FrameLayout(this).apply {
+            background = workspaceFrameDrawable()
+            val edges = launcherFrameRuntime?.borderInsets ?: intArrayOf(0, 0, 0, 0)
+            // Leave the shared frame visible without painting over MC controls.
+            setPadding(max(dp(if (cyberdeckMode) 8 else 6), edges[0]), max(dp(18), edges[1]),
+                max(dp(6), edges[2]), max(dp(6), edges[3]))
+            addView(main, FrameLayout.LayoutParams(-1, -1))
+        }
+        val header = buildWorkspaceHeader(main)
+        val frame = FrameLayout(this).apply {
+            clipChildren = false
+            clipToPadding = false
+            addView(border, FrameLayout.LayoutParams(-1, -1).apply { topMargin = dp(10); bottomMargin = dp(2) })
+            addView(header, FrameLayout.LayoutParams(-1, dp(48)).apply { leftMargin = dp(12); rightMargin = dp(4); topMargin = -dp(14) })
+        }
+        workspaceFrame = frame
         val mainParams = FrameLayout.LayoutParams(-1, -1)
         applyMainMargins(mainParams)
-        root.addView(main, mainParams)
+        val menu = buildMenuBar()
+        if (floatingWindow) {
+            val host = FrameLayout(this)
+            floatingHost = host
+            root.addView(host, mainParams)
+            floatingPanel = FloatingFilesPanel(this, host, frame, listOf(header, menu), { floatingBounds }, { bounds ->
+                floatingBounds = bounds
+                themePrefs().edit().putFloat("floating.left", bounds.left).putFloat("floating.top", bounds.top)
+                    .putFloat("floating.width", bounds.width).putFloat("floating.height", bounds.height).apply()
+            }, { floatingAvailableHeight() }, { floatingFullscreen }) { _, glyph ->
+                label(glyph, outputTextSizeSp, false).apply {
+                    gravity = Gravity.CENTER
+                    setTextColor(launcherPanelBorderColor)
+                    alpha = .22f
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }
+            }
+        } else root.addView(frame, mainParams)
         root.requestApplyInsets()
 
-        main.addView(buildTopBar(), LinearLayout.LayoutParams(-1, dp(18)))
-        main.addView(buildMenuBar(), LinearLayout.LayoutParams(-1, dp(30)))
-        main.addView(buildAddressBar(), LinearLayout.LayoutParams(-1, dp(36)))
+        main.addView(menu, LinearLayout.LayoutParams(-1, dp(32)))
         val workspace = FrameLayout(this)
         contentHost = FrameLayout(this)
         workspace.addView(contentHost, FrameLayout.LayoutParams(-1, -1))
-        workspace.addView(buildSelectionBar(), FrameLayout.LayoutParams(-1, dp(38), Gravity.TOP))
+        val selectionScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(buildSelectionBar(), FrameLayout.LayoutParams(-2, -1))
+        }
+        selectionScrollView = selectionScroll
+        val selection = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(headerPanelColor)
+            addView(selectionScroll, LinearLayout.LayoutParams(0, -1, 1f))
+        }
+        val close = label("X", outputTextSizeSp, true).apply {
+            gravity = Gravity.CENTER
+            contentDescription = "Clear selection or cancel pending action"
+            setOnClickListener {
+                when {
+                    activeSearchCancellation != null -> activeSearchCancellation?.set(true)
+                    activeArchive != null -> clearArchiveSelection()
+                    pendingArchiveExtraction != null -> cancelArchiveExtraction()
+                    shareSelectionMode -> closeShareSelection()
+                    else -> clearSelection()
+                }
+            }
+        }
+        selection.addView(close, LinearLayout.LayoutParams(dp(32), -1))
+        selectionSurface = selection
+        selection.visibility = selectionBar?.visibility ?: View.GONE
+        workspace.addView(selection, FrameLayout.LayoutParams(-1, dp(32), Gravity.TOP))
         val workspaceParams = LinearLayout.LayoutParams(-1, 0, 1f)
-        workspaceParams.topMargin = dp(4)
+        workspaceParams.topMargin = dp(1)
         main.addView(workspace, workspaceParams)
+        main.addView(buildCommandLine(), LinearLayout.LayoutParams(-1, dp(32)))
+        main.addView(buildFunctionBar(), LinearLayout.LayoutParams(-1, dp(64)))
         return root
     }
 
@@ -578,7 +666,7 @@ open class MainActivity : Activity() {
         row.id = R.id.fm_selection_bar
         row.orientation = LinearLayout.HORIZONTAL
         row.gravity = Gravity.CENTER_VERTICAL
-        row.setPadding(dp(6), dp(3), dp(6), dp(3))
+        row.setPadding(dp(6), 0, 0, 0)
         row.background = toolbarDrawable()
         row.visibility = if (shareSelectionMode || activeArchive != null || pendingArchiveExtraction != null || selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty() || pendingMovePaths.isNotEmpty()) View.VISIBLE else View.GONE
         updateSelectionBar()
@@ -587,15 +675,20 @@ open class MainActivity : Activity() {
 
     private fun updateSelectionBar() {
         val row = selectionBar ?: return
+        updateFunctionBar()
         row.removeAllViews()
         val hasWork = activeSearchCancellation != null || shareSelectionMode || activeArchive != null || pendingArchiveExtraction != null || selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty() || pendingMovePaths.isNotEmpty()
         row.visibility = if (hasWork && currentScreen == Screen.TREE) View.VISIBLE else View.GONE
-        if (!hasWork) return
+        selectionSurface?.visibility = row.visibility
+        if (!hasWork) {
+            selectionScrollView?.scrollTo(0, 0)
+            return
+        }
         activeSearchCancellation?.let {
             val count = label("Searching… $searchScanned scanned", max(10, outputTextSizeSp - 2), true)
             count.gravity = Gravity.CENTER_VERTICAL
             count.setTextColor(moduleTextColor)
-            row.addView(count, LinearLayout.LayoutParams(0, -1, 1f))
+            row.addView(count, LinearLayout.LayoutParams(dp(120), -1))
             addSelectionAction(row, "CANCEL") { it.set(true) }
             return
         }
@@ -603,11 +696,10 @@ open class MainActivity : Activity() {
             val count = label(if (selectedPaths.isEmpty()) archive.name else "${selectedPaths.size} selected", max(10, outputTextSizeSp - 2), true)
             count.gravity = Gravity.CENTER_VERTICAL
             count.setTextColor(moduleTextColor)
-            row.addView(count, LinearLayout.LayoutParams(0, -1, 1f))
+            row.addView(count, LinearLayout.LayoutParams(dp(120), -1))
             addSelectionAction(row, if (selectedPaths.isEmpty()) "EXTRACT ALL" else "EXTRACT") { extractArchiveNamed() }
             addSelectionAction(row, "EXTRACT HERE") { extractArchiveHere() }
             addSelectionAction(row, "EXTRACT TO") { prepareArchiveExtractTo() }
-            if (selectedPaths.isNotEmpty()) addSelectionAction(row, "X") { clearArchiveSelection() }
             return
         }
         pendingArchiveExtraction?.let { request ->
@@ -615,9 +707,8 @@ open class MainActivity : Activity() {
             val count = label(text, max(10, outputTextSizeSp - 2), true)
             count.gravity = Gravity.CENTER_VERTICAL
             count.setTextColor(moduleTextColor)
-            row.addView(count, LinearLayout.LayoutParams(0, -1, 1f))
+            row.addView(count, LinearLayout.LayoutParams(dp(120), -1))
             addSelectionAction(row, "EXTRACT HERE") { confirmArchiveExtractHere() }
-            addSelectionAction(row, "X") { cancelArchiveExtraction() }
             return
         }
         val countText = when {
@@ -629,10 +720,9 @@ open class MainActivity : Activity() {
         val count = label(countText, max(10, outputTextSizeSp - 2), true)
         count.gravity = Gravity.CENTER_VERTICAL
         count.setTextColor(moduleTextColor)
-        row.addView(count, LinearLayout.LayoutParams(0, -1, 1f))
+        row.addView(count, LinearLayout.LayoutParams(dp(120), -1))
         if (shareSelectionMode) {
             if (selectedPaths.isNotEmpty()) addSelectionAction(row, "SHARE") { shareSelectedFiles() }
-            addSelectionAction(row, "X") { closeShareSelection() }
             return
         }
         if (selectedPaths.isNotEmpty()) {
@@ -652,7 +742,6 @@ open class MainActivity : Activity() {
         } else {
             addSelectionAction(row, "PASTE") { confirmPaste() }
         }
-        addSelectionAction(row, "X") { clearSelection() }
     }
 
     private fun addSelectionAction(parent: LinearLayout, text: String, action: () -> Unit) {
@@ -678,6 +767,7 @@ open class MainActivity : Activity() {
     }
 
     private fun buildTreePanes(): View {
+        tappedLeftEntry = null
         val panes = LinearLayout(this)
         panes.orientation = LinearLayout.HORIZONTAL
         val leftParams = LinearLayout.LayoutParams(0, -1, 0.38f)
@@ -691,182 +781,264 @@ open class MainActivity : Activity() {
         return panes
     }
 
+    private fun reflowTreePanes() {
+        pendingPaneRelayout = false
+        val leftScroll = leftScrollView?.scrollY ?: 0
+        val first = rightListView?.firstVisiblePosition ?: 0
+        val offset = rightListView?.getChildAt(0)?.top ?: 0
+        contentHost?.removeAllViews()
+        contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
+        renderAll()
+        updateSelectionBar()
+        leftScrollView?.post { leftScrollView?.scrollTo(0, leftScroll) }
+        rightListView?.post { rightListView?.setSelectionFromTop(first, offset) }
+    }
+
     private fun installWindowInsetsHandler(root: FrameLayout) {
         root.setOnApplyWindowInsetsListener { _, insets ->
-            val safeInsets = FmVisualInterop.safeInsets(insets)
+            val safeInsets = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val safe = insets.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
+                intArrayOf(safe.left, safe.top, safe.right, safe.bottom)
+            } else FmVisualInterop.safeInsets(insets).apply {
+                @Suppress("DEPRECATION")
+                val cutoutBottom = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) insets.displayCutout?.safeInsetBottom ?: 0 else 0
+                this[3] = min(this[3], max(insets.stableInsetBottom.coerceAtLeast(0), cutoutBottom))
+            }
             systemInsetLeft = safeInsets[0]
             systemInsetTop = safeInsets[1]
             systemInsetRight = safeInsets[2]
             systemInsetBottom = safeInsets[3]
-            root.setPadding(systemInsetLeft, 0, systemInsetRight, systemInsetBottom)
+            keyboardInsetExtra = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars()).bottom
+                val ime = insets.getInsets(android.view.WindowInsets.Type.ime()).bottom
+                (ime - bars).coerceAtLeast(0)
+            } else {
+                @Suppress("DEPRECATION")
+                (insets.systemWindowInsetBottom - systemInsetBottom).coerceAtLeast(0)
+            }
+            root.setPadding(systemInsetLeft, 0, systemInsetRight, systemInsetBottom + keyboardInsetExtra)
             updateMainMargins()
+            floatingPanel?.post { floatingPanel?.fit() }
             insets
         }
     }
 
     private fun updateMainMargins() {
-        val params = mainContainer?.layoutParams as? FrameLayout.LayoutParams ?: return
+        val target = if (floatingWindow) floatingHost else workspaceFrame
+        val params = target?.layoutParams as? FrameLayout.LayoutParams ?: return
+        val previous = listOf(params.leftMargin, params.topMargin, params.rightMargin, params.bottomMargin)
         applyMainMargins(params)
-        mainContainer?.layoutParams = params
+        if (previous != listOf(params.leftMargin, params.topMargin, params.rightMargin, params.bottomMargin)) {
+            target.layoutParams = params
+            floatingPanel?.post { floatingPanel?.fit() }
+        }
     }
 
     private fun applyMainMargins(params: FrameLayout.LayoutParams) {
         params.setMargins(
             dp(8) + displayMarginLeftPx,
-            systemInsetTop + dp(topMarginDp) + displayMarginTopPx,
+            // Floating chrome already reserves its header/gutter; avoid the legacy panel offset.
+            systemInsetTop + (if (floatingWindow) 0 else dp(topMarginDp)) + displayMarginTopPx,
             dp(8) + displayMarginRightPx,
             dp(8) + displayMarginBottomPx
         )
     }
 
-    private fun buildTopBar(): View {
-        val row = LinearLayout(this)
-        row.orientation = LinearLayout.HORIZONTAL
-        row.gravity = Gravity.TOP or Gravity.CENTER_VERTICAL
-        row.clipChildren = false
-        row.clipToPadding = false
-        row.setPadding(dp(28), 0, dp(18), 0)
-        row.contentDescription = "Drag floating Files window"
-        installFloatingWindowDrag(row)
-
-        val title = label("RETUI FM", 16, true)
-        title.gravity = Gravity.CENTER
-        title.setTextColor(headerTextColor)
-        title.setPadding(dp(4), 0, dp(4), 0)
-        title.background = panelDrawable(PanelRole.HEADER)
-        title.translationY = -dp(topTabOverlapDp).toFloat()
-        row.addView(title, LinearLayout.LayoutParams(dp(124), dp(28)))
-
-        return row
+    private fun floatingAvailableHeight(): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            val host = floatingHost ?: return 0
+            if (keyboardInsetExtra == 0) {
+                legacyFloatingHeight = host.height
+                legacyFloatingWidth = host.width
+            }
+            return if (legacyFloatingWidth == host.width && legacyFloatingHeight > 0) legacyFloatingHeight
+                else host.height + keyboardInsetExtra
+        }
+        return windowManager.currentWindowMetrics.bounds.height() - systemInsetTop - systemInsetBottom -
+            displayMarginTopPx - dp(8) - displayMarginBottomPx
     }
 
-    private fun installFloatingWindowDrag(handle: View) {
-        if (!floatingWindow) return
-        var downRawX = 0f
-        var downRawY = 0f
-        var startX = 0
-        var startY = 0
-        handle.setOnTouchListener { _, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    downRawX = event.rawX
-                    downRawY = event.rawY
-                    startX = window.attributes.x
-                    startY = window.attributes.y
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val metrics = resources.displayMetrics
-                    val attrs = window.attributes
-                    val actualWidth = window.decorView.width.takeIf { it > 0 } ?: attrs.width
-                    val actualHeight = window.decorView.height.takeIf { it > 0 } ?: attrs.height
-                    attrs.gravity = Gravity.TOP or Gravity.START
-                    attrs.x = clampFloatingWindowPosition(startX, event.rawX - downRawX, metrics.widthPixels, actualWidth)
-                    attrs.y = clampFloatingWindowPosition(startY, event.rawY - downRawY, metrics.heightPixels, actualHeight)
-                    windowManager.updateViewLayout(window.decorView, attrs)
-                }
-                MotionEvent.ACTION_UP -> handle.performClick()
-            }
-            true
+    private fun buildWorkspaceHeader(content: View): View = object : FrameLayout(this) {
+        override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+            val bounds = android.graphics.Rect()
+            if (event.actionMasked == MotionEvent.ACTION_DOWN && content.getGlobalVisibleRect(bounds) &&
+                bounds.contains(event.rawX.toInt(), event.rawY.toInt())) return false
+            return super.dispatchTouchEvent(event)
         }
+    }.apply {
+        fun tab(text: String, description: String, action: (() -> Unit)? = null): TextView =
+            label(text, launcherHeaderTextSizeSp, false).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(10), 0, dp(10), 0)
+                setTextColor(launcherHeaderTextColor)
+                contentDescription = description
+                val fill = GradientDrawable().apply {
+                    setColor(launcherHeaderColor)
+                    cornerRadius = dp(headerCornerRadiusDp).toFloat()
+                }
+                background = launcherFrameRuntime?.drawable(fill) ?: fill
+                action?.let { setOnClickListener { it() } }
+            }
+        addView(tab("RE:TUI FM", "RE:TUI FM window").apply { ellipsize = TextUtils.TruncateAt.END },
+            FrameLayout.LayoutParams(-2, dp(20), Gravity.LEFT).apply { topMargin = dp(14); rightMargin = dp(if (floatingWindow) 144 else 96) })
+        fun control(text: String, description: String, rightMargin: Int, action: () -> Unit): FrameLayout {
+            val target = FrameLayout(this@MainActivity).apply {
+                contentDescription = description
+                isFocusable = true
+                setOnClickListener { action() }
+                val icon = tab(text, description).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+                if (rightMargin == 96) fullscreenIcon = icon
+                addView(icon,
+                    FrameLayout.LayoutParams(-1, dp(20)).apply { topMargin = dp(14) })
+            }
+            addView(target, FrameLayout.LayoutParams(dp(48), -1, Gravity.RIGHT).apply { this.rightMargin = dp(rightMargin) })
+            return target
+        }
+        control("×", "Close RE:TUI FM", 48) { finish() }
+        control("?", "RE:TUI FM help", 0) { showHelpPopup() }
+        if (floatingWindow) {
+            fullscreenControl = control("□", "Fullscreen RE:TUI FM", 96) {
+                floatingFullscreen = !floatingFullscreen
+                themePrefs().edit().putBoolean("floating.fullscreen", floatingFullscreen).apply()
+                updateFullscreenControl()
+                configureWindow()
+                rootView?.requestApplyInsets()
+                floatingPanel?.fit()
+            }
+            updateFullscreenControl()
+        }
+    }
+
+    private fun updateFullscreenControl() {
+        fullscreenControl?.contentDescription = if (floatingFullscreen) "Restore floating RE:TUI FM" else "Fullscreen RE:TUI FM"
+        fullscreenIcon?.text = if (floatingFullscreen) "▣" else "□"
     }
 
     private fun buildMenuBar(): View {
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
         row.gravity = Gravity.CENTER_VERTICAL
-        row.setPadding(dp(8), 0, dp(8), 0)
-        row.background = toolbarDrawable()
-        addMenuButton(row, "File") { showFileMenu() }
-        addMenuButton(row, "Edit") { showEditMenu() }
-        addMenuButton(row, "View") { showViewMenu() }
-        addMenuButton(row, "Go") { showGoMenu() }
+        row.setBackgroundColor(headerPanelColor)
         addMenuButton(row, "Places") { showPlacesMenu() }
-        addMenuButton(row, "Help") { showHelpPopup() }
+        addMenuButton(row, "File") { showFileMenu() }
+        addMenuButton(row, "Command") { showCommandMenu() }
+        addMenuButton(row, "Options") { showOptionsMenu() }
+        addMenuButton(row, "Sort") { showSortMenu() }
         return row
     }
 
-    private fun buildAddressBar(): View {
-        val row = LinearLayout(this)
-        row.id = R.id.fm_address_bar
-        row.orientation = LinearLayout.HORIZONTAL
-        row.gravity = Gravity.CENTER_VERTICAL
-        row.setPadding(dp(8), dp(3), dp(8), dp(3))
-        row.background = toolbarDrawable()
-        addToolbarIconButton(row, R.drawable.ic_fm_parent, "Go to parent folder") { goParent() }
-        addToolbarIconButton(row, R.drawable.ic_fm_home, "Go home") { showHome() }
-        addToolbarIconButton(row, R.drawable.ic_fm_folder_plus, "Create folder") { promptMkdir() }
-        addToolbarIconButton(row, R.drawable.ic_fm_refresh, "Refresh folder") { reloadAll() }
-        val address = LinearLayout(this)
-        address.orientation = LinearLayout.HORIZONTAL
-        address.gravity = Gravity.CENTER_VERTICAL
-        address.setPadding(dp(8), 0, dp(8), 0)
-        address.background = addressDrawable()
-        address.setOnClickListener { promptSearch(null, "Search device") }
-        val folder = ImageView(this)
-        folder.setImageResource(R.drawable.ic_fm_folder)
-        folder.setColorFilter(iconColor(false))
-        address.addView(folder, LinearLayout.LayoutParams(dp(18), dp(18)))
-        val path = label("/", outputTextSizeSp, true)
-        path.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-        path.setPadding(dp(6), 0, 0, 0)
-        path.setTextColor(outputTextColor)
-        path.contentDescription = "Current folder. Tap for breadcrumbs; tap the address area to search."
-        path.setOnClickListener {
-            if (currentScreen == Screen.TREE && activeArchive == null && rightVirtualTitle == null) {
-                showBreadcrumbMenu()
-            } else {
-                promptSearch(null, "Search device")
-            }
-        }
-        path.setOnLongClickListener {
-            if (currentScreen == Screen.TREE && activeArchive == null && rightVirtualTitle == null) showBreadcrumbMenu()
-            else promptSearch(null, "Search device")
-            true
-        }
-        addressPathView = path
-        val addressContent = FrameLayout(this)
-        addressContent.addView(path, FrameLayout.LayoutParams(-1, -1))
-        val breadcrumb = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            contentDescription = "Tappable breadcrumb path"
-            visibility = View.GONE
-        }
-        val breadcrumbItems = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        breadcrumb.addView(breadcrumbItems, FrameLayout.LayoutParams(-2, -1))
-        breadcrumbScroll = breadcrumb
-        breadcrumbBar = breadcrumbItems
-        addressContent.addView(breadcrumb, FrameLayout.LayoutParams(-1, -1))
-        address.addView(addressContent, LinearLayout.LayoutParams(0, -1, 1f))
-        updateAddressBar()
-        val params = LinearLayout.LayoutParams(0, -1, 1f)
-        params.leftMargin = dp(6)
-        row.addView(address, params)
-        val command = ImageView(this)
+    private fun buildCommandLine(): View {
+        val command = label("", max(11, outputTextSizeSp), false)
         command.id = R.id.fm_command_button
-        command.setImageResource(android.R.drawable.ic_menu_manage)
-        command.setColorFilter(iconColor(false))
-        command.contentDescription = "Open command palette"
-        command.tooltipText = "Open command palette"
+        command.gravity = Gravity.CENTER_VERTICAL
+        command.setPadding(dp(8), 0, dp(8), 0)
+        command.setTextColor(inputTextColor)
+        command.setBackgroundColor(outputPanelColor)
+        commanderSkin?.style("core", "commandline")?.displayed?.let { styleCommanderText(command, it, background = true) }
+        command.contentDescription = "Open file command palette"
         command.setOnClickListener { promptCommand() }
-        row.addView(command, LinearLayout.LayoutParams(dp(36), -1))
-        return row
+        commandLineView = command
+        return command
+    }
+
+    private fun buildFunctionBar(): View {
+        val bar = LinearLayout(this)
+        bar.id = R.id.fm_function_bar
+        bar.orientation = LinearLayout.VERTICAL
+        functionBar = bar
+        updateFunctionBar()
+        return bar
+    }
+
+    private fun updateFunctionBar() {
+        val bar = functionBar ?: return
+        bar.removeAllViews()
+        val names = listOf("Help", "Menu", "View", "Edit",
+            if (pendingCopyPaths.isNotEmpty()) "Paste" else "Copy",
+            if (pendingMovePaths.isNotEmpty()) "Move here" else "Move",
+            "Mkdir", "Trash", "Menus", "Quit")
+        for (group in names.indices.chunked(5)) {
+            val row = LinearLayout(this)
+            row.orientation = LinearLayout.HORIZONTAL
+            for (index in group) {
+                val button = label("${index + 1} ${names[index]}", outputTextSizeSp, false)
+                button.id = View.generateViewId()
+                button.gravity = Gravity.CENTER
+                button.setSingleLine(false)
+                button.maxLines = 2
+                button.setTextColor(moduleButtonTextColor)
+                button.setBackgroundColor(moduleButtonBgColor)
+                commanderSkin?.style("buttonbar", "button")?.displayed?.let { styleCommanderText(button, it, background = true) }
+                button.contentDescription = "F${index + 1} ${names[index]}"
+                button.setOnClickListener { runFunctionAction(index + 1) }
+                val params = LinearLayout.LayoutParams(0, -1, 1f)
+                params.setMargins(dp(1), dp(1), dp(1), dp(1))
+                row.addView(button, params)
+            }
+            bar.addView(row, LinearLayout.LayoutParams(-1, dp(32)))
+        }
+    }
+
+    private fun runFunctionAction(number: Int) {
+        when (number) {
+            1 -> showHelpPopup()
+            2 -> showEditMenu()
+            3 -> openSelected()
+            4 -> withSelected("EDIT") { editFile(it) }
+            5 -> if (pendingCopyPaths.isNotEmpty()) confirmPaste() else actOnMarkedOrCurrent(::prepareCopy)
+            6 -> if (pendingMovePaths.isNotEmpty()) confirmMoveHere() else actOnMarkedOrCurrent(::prepareMove)
+            7 -> promptMkdir()
+            8 -> actOnMarkedOrCurrent {
+                if (selectedFiles().all(::isInTrash)) confirmDeleteSelectedPermanently() else confirmBulkTrash()
+            }
+            9 -> showActionMenu("Menus", listOf(
+                "Places" to { showPlacesMenu() }, "File" to { showFileMenu() },
+                "Command" to { showCommandMenu() }, "Options" to { showOptionsMenu() },
+                "Sort" to { showSortMenu() }
+            ))
+            10 -> finish()
+        }
+    }
+
+    private fun actOnMarkedOrCurrent(action: () -> Unit) {
+        if (activeArchive != null) {
+            showActionMenu("Archive", listOf("Extract" to { extractArchiveNamed() }, "Extract to" to { prepareArchiveExtractTo() }))
+            return
+        }
+        if (selectedPaths.isEmpty()) {
+            val entry = activePane().rows.getOrNull(activePane().cursor)
+            entry?.providerItem?.let { showProviderItemMenu(it, entry.providerRootUri); return }
+            val file = entry?.file
+            if (entry == null || entry.isParent || entry.isSection || entry.isTrashPlace || file == null || !file.exists()) {
+                showOutput("SELECT", "Select a file or folder first.")
+                return
+            }
+            toggleSelection(file)
+        }
+        action()
     }
 
     private fun buildPane(panel: Panel): View {
         val pane = LinearLayout(this)
         pane.orientation = LinearLayout.VERTICAL
-        pane.setPadding(dp(8), dp(6), dp(8), dp(4))
-        pane.background = panelDrawable(PanelRole.OUTPUT)
+        val framePadding = if (commanderSkin?.doubleFrame == true) 4 else 3
+        pane.setPadding(dp(framePadding), dp(framePadding), dp(framePadding), dp(framePadding))
+        pane.background = CommanderFrameDrawable(outputPanelColor, outputBorderColor, dpFloat(1f), commanderSkin?.doubleFrame == true)
         pane.setOnClickListener { switchPanel(panel) }
+        val title = label("", outputTextSizeSp, false)
+        title.gravity = Gravity.CENTER_VERTICAL
+        title.ellipsize = TextUtils.TruncateAt.START
+        title.setPadding(dp(4), 0, dp(4), 0)
+        title.contentDescription = if (panel == Panel.LEFT) "Folder browser menu" else "Path and breadcrumbs"
+        title.setOnClickListener { if (panel == Panel.LEFT) showFolderBrowserMenu() else showBreadcrumbMenu() }
+        pane.addView(title, LinearLayout.LayoutParams(-1, dp(32)))
+        if (panel == Panel.LEFT) leftTitleView = title else rightTitleView = title
 
         if (panel == Panel.LEFT) {
             val header = LinearLayout(this)
             header.orientation = LinearLayout.HORIZONTAL
-            header.addView(column("LOCATIONS", 1f, Gravity.START))
-            pane.addView(header, LinearLayout.LayoutParams(-1, dp(24)))
+            header.addView(column("Name", 1f, Gravity.START))
+            pane.addView(header, LinearLayout.LayoutParams(-1, dp(20)))
             val scroll = ScrollView(this)
             scroll.isFillViewport = true
             scroll.isVerticalScrollBarEnabled = true
@@ -877,15 +1049,16 @@ open class MainActivity : Activity() {
             leftRowsView = rows
             leftScrollView = scroll
         } else {
-            pane.addView(buildRightSortBar(), LinearLayout.LayoutParams(-1, dp(30)))
-            val grid = GridView(this)
-            grid.stretchMode = GridView.STRETCH_COLUMN_WIDTH
-            grid.horizontalSpacing = dp(4)
-            grid.verticalSpacing = dp(4)
+            pane.addView(buildRightSortBar(), LinearLayout.LayoutParams(-1, dp(20)))
+            val grid = ListView(this)
+            grid.id = R.id.fm_file_list
+            grid.divider = null
+            grid.dividerHeight = 0
             grid.clipToPadding = false
             grid.isVerticalScrollBarEnabled = true
             grid.cacheColorHint = Color.TRANSPARENT
             grid.setOnItemClickListener { _, _, position, _ ->
+                tappedLeftEntry = null
                 activePanel = Panel.RIGHT
                 rightPane.cursor = position
                 clampCursor(rightPane)
@@ -898,6 +1071,7 @@ open class MainActivity : Activity() {
                 }
             }
             grid.setOnItemLongClickListener { _, _, position, _ ->
+                tappedLeftEntry = null
                 activePanel = Panel.RIGHT
                 rightPane.cursor = position
                 showRightCursorHighlight = false
@@ -908,15 +1082,29 @@ open class MainActivity : Activity() {
                 true
             }
             pane.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
-            rightGridView = grid
+            rightListView = grid
+            grid.addOnLayoutChangeListener { _, left, _, right, _, _, _, _, _ ->
+                val visible = right - left >= dp(240)
+                rightModifiedSortView?.visibility = if (visible) View.VISIBLE else View.GONE
+                if (visible != showModifiedColumn) {
+                    showModifiedColumn = visible
+                    val first = grid.firstVisiblePosition
+                    val offset = grid.getChildAt(0)?.top ?: 0
+                    rightListAdapter?.notifyDataSetChanged()
+                    grid.post { grid.setSelectionFromTop(first, offset) }
+                }
+            }
         }
 
         val footer = label("", max(10, outputTextSizeSp - 2), true)
         footer.gravity = Gravity.START or Gravity.CENTER_VERTICAL
-        pane.addView(footer, LinearLayout.LayoutParams(-1, dp(24)))
+        footer.setPadding(dp(4), 0, dp(4), 0)
+        footer.ellipsize = TextUtils.TruncateAt.END
+        footer.background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(max(1, dp(1)), outputBorderColor) }
+        pane.addView(footer, LinearLayout.LayoutParams(-1, dp(20)))
         val disk = label("", max(10, outputTextSizeSp - 2), true)
         disk.gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        pane.addView(disk, LinearLayout.LayoutParams(-1, dp(22)))
+        pane.addView(disk, LinearLayout.LayoutParams(-1, dp(20)))
 
         if (panel == Panel.LEFT) {
             leftFooterView = footer
@@ -930,51 +1118,57 @@ open class MainActivity : Activity() {
 
     private fun buildRightSortBar(): View {
         val bar = LinearLayout(this)
-        bar.gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        bar.setPadding(dp(4), 0, dp(4), 0)
-        bar.background = ColorDrawable(headerPanelColor)
-        rightNameSortView = addSortButton(bar, android.R.drawable.ic_menu_sort_alphabetically, "Sort by name") {
+        bar.gravity = Gravity.CENTER_VERTICAL
+        val name = column("Name", 1f, Gravity.START)
+        name.contentDescription = "Sort by name"
+        name.setOnClickListener {
             rightSortMode = if (rightSortMode == SortMode.NAME_ASC) SortMode.NAME_DESC else SortMode.NAME_ASC
             sortRightPane()
         }
-        rightModifiedSortView = addSortButton(bar, android.R.drawable.ic_menu_recent_history, "Sort by modified date") {
-            rightSortMode = if (rightSortMode == SortMode.MODIFIED_NEWEST) SortMode.MODIFIED_OLDEST else SortMode.MODIFIED_NEWEST
-            sortRightPane()
-        }
-        addSortButton(bar, android.R.drawable.ic_menu_sort_by_size, "More sorting options") {
-            showActionMenu("Sort", listOf(
-                "Name A–Z" to { rightSortMode = SortMode.NAME_ASC; sortRightPane() },
-                "Newest first" to { rightSortMode = SortMode.MODIFIED_NEWEST; sortRightPane() },
-                "Largest first" to { rightSortMode = SortMode.SIZE_LARGEST; sortRightPane() },
-                "Smallest first" to { rightSortMode = SortMode.SIZE_SMALLEST; sortRightPane() },
-                "File type" to { rightSortMode = SortMode.TYPE; sortRightPane() }
-            ))
+        bar.addView(name)
+        rightNameSortView = name
+        val size = column("Size", 0f, Gravity.END)
+        size.layoutParams = LinearLayout.LayoutParams(dp(54), -1)
+        size.contentDescription = "Sort order"
+        size.setOnClickListener { showSortMenu() }
+        bar.addView(size)
+        run {
+            val date = column("Modified", 0f, Gravity.CENTER)
+            date.layoutParams = LinearLayout.LayoutParams(dp(84), -1)
+            date.contentDescription = "Sort by modified date"
+            date.setOnClickListener {
+                rightSortMode = if (rightSortMode == SortMode.MODIFIED_NEWEST) SortMode.MODIFIED_OLDEST else SortMode.MODIFIED_NEWEST
+                sortRightPane()
+            }
+            bar.addView(date)
+            rightModifiedSortView = date
+            date.visibility = if (showModifiedColumn) View.VISIBLE else View.GONE
         }
         updateSortButtons()
         return bar
     }
 
-    private fun addSortButton(parent: LinearLayout, icon: Int, description: String, action: () -> Unit): ImageView {
-        val view = ImageView(this)
-        view.setImageResource(icon)
-        view.setColorFilter(headerTextColor)
-        view.contentDescription = description
-        view.tooltipText = description
-        view.setPadding(dp(4), dp(2), dp(4), dp(2))
-        view.setOnClickListener { action() }
-        parent.addView(view, LinearLayout.LayoutParams(dp(40), -1))
-        return view
+    private fun showSortMenu() {
+        showActionMenu("Sort order", listOf(
+            "Name A–Z" to { rightSortMode = SortMode.NAME_ASC; sortRightPane() },
+            "Name Z–A" to { rightSortMode = SortMode.NAME_DESC; sortRightPane() },
+            "Newest first" to { rightSortMode = SortMode.MODIFIED_NEWEST; sortRightPane() },
+            "Oldest first" to { rightSortMode = SortMode.MODIFIED_OLDEST; sortRightPane() },
+            "Largest first" to { rightSortMode = SortMode.SIZE_LARGEST; sortRightPane() },
+            "Smallest first" to { rightSortMode = SortMode.SIZE_SMALLEST; sortRightPane() },
+            "File type" to { rightSortMode = SortMode.TYPE; sortRightPane() }
+        ))
     }
 
     private fun updateSortButtons() {
         rightNameSortView?.apply {
             alpha = if (rightSortMode == SortMode.NAME_ASC || rightSortMode == SortMode.NAME_DESC) 1f else 0.5f
-            rotation = if (rightSortMode == SortMode.NAME_DESC) 180f else 0f
+            text = if (rightSortMode == SortMode.NAME_DESC) "Name ↓" else "Name ↑"
             contentDescription = if (rightSortMode == SortMode.NAME_DESC) "Name descending" else "Name ascending"
         }
         rightModifiedSortView?.apply {
             alpha = if (rightSortMode == SortMode.MODIFIED_NEWEST || rightSortMode == SortMode.MODIFIED_OLDEST) 1f else 0.5f
-            rotation = if (rightSortMode == SortMode.MODIFIED_OLDEST) 180f else 0f
+            text = "Modified"
             contentDescription = if (rightSortMode == SortMode.MODIFIED_OLDEST) "Oldest modified first" else "Recently modified first"
         }
     }
@@ -1044,7 +1238,7 @@ open class MainActivity : Activity() {
         if (tree) navigationHistory.addLast(captureNavigation())
         suppressNavigationHistory = true
         try {
-            if (tree) showTree(start, recordHistory = false) else showHome(recordHistory = false)
+            showTree(start, recordHistory = false)
             handleIncomingRequest(intent)
         } finally {
             suppressNavigationHistory = false
@@ -1069,8 +1263,8 @@ open class MainActivity : Activity() {
         updateAddressBar()
         leftRowsView = null
         leftScrollView = null
-        rightGridView = null
-        rightGridAdapter = null
+        rightListView = null
+        rightListAdapter = null
         leftFooterView = null
         rightFooterView = null
         leftDiskView = null
@@ -1082,6 +1276,7 @@ open class MainActivity : Activity() {
     private fun showTree(dir: File = rightPane.directory, recordHistory: Boolean = true) {
         if (recordHistory && currentScreen != Screen.TREE) rememberNavigation()
         currentScreen = Screen.TREE
+        activePanel = Panel.RIGHT
         updateSelectionBar()
         homeCountVersion++
         contentHost?.removeAllViews()
@@ -1204,25 +1399,33 @@ open class MainActivity : Activity() {
 
     private fun handleHardwareKey(keyCode: Int, event: KeyEvent?): Boolean {
         if (event == null || event.action != KeyEvent.ACTION_DOWN) return false
+        if (keyCode in KeyEvent.KEYCODE_F1..KeyEvent.KEYCODE_F10) {
+            runFunctionAction(keyCode - KeyEvent.KEYCODE_F1 + 1)
+            return true
+        }
         return when (keyCode) {
             KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_DPAD_CENTER -> {
                 openSelected()
                 true
             }
             KeyEvent.KEYCODE_DPAD_UP -> {
-                moveCursor(if (activePanel == Panel.RIGHT) -gridColumnCount() else -1)
+                moveCursor(-1)
                 true
             }
             KeyEvent.KEYCODE_DPAD_DOWN -> {
-                moveCursor(if (activePanel == Panel.RIGHT) gridColumnCount() else 1)
+                moveCursor(1)
                 true
             }
             KeyEvent.KEYCODE_DPAD_LEFT -> {
-                if (activePanel == Panel.RIGHT && rightPane.cursor % gridColumnCount() != 0) moveCursor(-1) else switchPanel(Panel.LEFT)
+                switchPanel(Panel.LEFT)
                 true
             }
             KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                if (activePanel == Panel.RIGHT) moveCursor(1) else switchPanel(Panel.RIGHT)
+                switchPanel(Panel.RIGHT)
+                true
+            }
+            KeyEvent.KEYCODE_TAB -> {
+                switchPanel(if (activePanel == Panel.LEFT) Panel.RIGHT else Panel.LEFT)
                 true
             }
             KeyEvent.KEYCODE_PAGE_UP -> {
@@ -1309,27 +1512,13 @@ open class MainActivity : Activity() {
     private fun reloadPane(pane: PaneState) {
         val dir = pane.directory
         pane.rows.clear()
-        if (pane !== leftPane) {
-            pane.rows.add(FileEntry(dir.parentFile, "/..", true, true))
-        }
+        pane.rows.add(FileEntry(dir.parentFile, "/..", true, true))
         val children = dir.listFiles()
         val files = children?.filter { showHidden || !it.name.startsWith(".") }.orEmpty()
         val sorted = if (pane === rightPane) sortedFiles(files) else files.sortedWith(
             compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase(Locale.US) }
         )
-        val visible = if (pane === leftPane) {
-            val places = placeEntries()
-            val placePaths = places.mapNotNull { it.file?.absolutePath }.toHashSet()
-            pane.rows.add(FileEntry(null, "PLACES", false, isSection = true))
-            pane.rows.addAll(places)
-            if (dir.absolutePath !in placePaths) {
-                pane.rows.add(FileEntry(dir, dir.name.ifBlank { dir.absolutePath }, true))
-            }
-            pane.rows.add(FileEntry(null, "FOLDERS", false, isSection = true))
-            sorted.filter { it.isDirectory && it.absolutePath !in placePaths }
-        } else {
-            sorted
-        }
+        val visible = if (pane === leftPane) sorted.filter { it.isDirectory } else sorted
         for (file in visible.take(MAX_ROWS)) {
             pane.rows.add(FileEntry(file, file.name, file.isDirectory))
         }
@@ -1341,7 +1530,7 @@ open class MainActivity : Activity() {
         clampCursor(pane)
     }
 
-    private fun placeEntries(): List<FileEntry> {
+    private fun placeEntries(includeRecent: Boolean = true): List<FileEntry> {
         val home = homeDirectory()
         val candidates = listOf(
             "Home" to home,
@@ -1367,7 +1556,7 @@ open class MainActivity : Activity() {
         }
         val recent = NavigationStateStore.recent(themePrefs())
             .filter { seen.add(it.absolutePath) }
-        if (recent.isNotEmpty()) {
+        if (includeRecent && recent.isNotEmpty()) {
             entries.add(FileEntry(null, "RECENT", false, isSection = true))
             entries.addAll(recent.map { FileEntry(it, "Recent: ${it.name.ifBlank { it.absolutePath }}", true) })
         }
@@ -1419,7 +1608,7 @@ open class MainActivity : Activity() {
     }
 
     private fun showCategoryRows(category: FileCategory, rows: List<FileEntry>) {
-        if (currentScreen != Screen.TREE || leftRowsView == null || rightGridView == null) {
+        if (currentScreen != Screen.TREE || leftRowsView == null || rightListView == null) {
             currentScreen = Screen.TREE
             contentHost?.removeAllViews()
             contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
@@ -1566,7 +1755,7 @@ open class MainActivity : Activity() {
     private fun showTrashContents(recordHistory: Boolean = true) {
         if (recordHistory) rememberNavigation()
         categoryLoadVersion++
-        if (currentScreen != Screen.TREE || leftRowsView == null || rightGridView == null) {
+        if (currentScreen != Screen.TREE || leftRowsView == null || rightListView == null) {
             currentScreen = Screen.TREE
             contentHost?.removeAllViews()
             contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
@@ -1597,48 +1786,19 @@ open class MainActivity : Activity() {
     }
 
     private fun updateAddressBar() {
-        val path = addressPathView ?: return
-        val isNormalFolder = currentScreen == Screen.TREE && activeArchive == null && activeProvider == null &&
-            activeCategory == null && rightVirtualTitle == null && ::rightPane.isInitialized
-        if (!isNormalFolder) {
-            path.visibility = View.VISIBLE
-            path.text = when {
-                currentScreen == Screen.HOME -> "HOME"
-                !rightVirtualTitle.isNullOrBlank() -> rightVirtualTitle
-                else -> abbreviatePath(rightPane.directory.absolutePath)
-            }
-            breadcrumbScroll?.visibility = View.GONE
-            return
+        leftTitleView?.apply {
+            text = "← ${abbreviatePath(leftPane.directory.absolutePath)}"
+            setTextColor(if (activePanel == Panel.LEFT) selectionTextColor else outputTextColor)
+            setBackgroundColor(if (activePanel == Panel.LEFT) selectionBgColor else headerPanelColor)
+            commanderSkin?.style("core", if (activePanel == Panel.LEFT) "reverse" else "frame")?.displayed?.let { styleCommanderText(this, it, background = true) }
         }
-        path.visibility = View.GONE
-        breadcrumbScroll?.visibility = View.VISIBLE
-        val items = breadcrumbBar ?: return
-        items.removeAllViews()
-        val chain = ArrayList<File>()
-        var cursor: File? = rightPane.directory
-        while (cursor != null) {
-            chain += cursor
-            cursor = cursor.parentFile
+        rightTitleView?.apply {
+            text = "${rightVirtualTitle ?: abbreviatePath(rightPane.directory.absolutePath)} →"
+            setTextColor(if (activePanel == Panel.RIGHT) selectionTextColor else outputTextColor)
+            setBackgroundColor(if (activePanel == Panel.RIGHT) selectionBgColor else headerPanelColor)
+            commanderSkin?.style("core", if (activePanel == Panel.RIGHT) "reverse" else "frame")?.displayed?.let { styleCommanderText(this, it, background = true) }
         }
-        chain.asReversed().forEachIndexed { index, folder ->
-            if (index > 0) {
-                val slash = label("/", max(11, outputTextSizeSp - 1), true)
-                slash.gravity = Gravity.CENTER
-                slash.setTextColor(withAlpha(outputTextColor, 150))
-                items.addView(slash, LinearLayout.LayoutParams(dp(14), -1))
-            }
-            val name = folder.name.ifBlank { folder.absolutePath }
-            val segment = label(name, max(10, outputTextSizeSp - 2), true)
-            segment.gravity = Gravity.CENTER_VERTICAL
-            segment.setPadding(dp(4), 0, dp(4), 0)
-            segment.setTextColor(if (folder.canonicalPath == rightPane.directory.canonicalPath) moduleButtonTextColor else outputTextColor)
-            segment.background = functionButtonBackground()
-            segment.id = R.id.fm_breadcrumb_segment
-            segment.contentDescription = "Breadcrumb $name"
-            segment.setOnClickListener { showDirectoryContents(folder) }
-            items.addView(segment, LinearLayout.LayoutParams(-2, -1))
-        }
-        breadcrumbScroll?.post { breadcrumbScroll?.fullScroll(View.FOCUS_RIGHT) }
+        commandLineView?.text = "$ " + if (currentScreen == Screen.HOME) "Command…" else "${abbreviatePath(rightPane.directory.absolutePath)} › Command…"
     }
 
     private fun renderActivePane() {
@@ -1652,118 +1812,111 @@ open class MainActivity : Activity() {
         val disk = if (panel == Panel.LEFT) leftDiskView else rightDiskView
         clampCursor(pane)
         if (panel == Panel.RIGHT) {
-            renderGrid()
+            renderFileList()
         } else {
+            val previousScroll = leftScrollView?.scrollY ?: 0
             rowsView?.removeAllViews()
             for (i in pane.rows.indices) {
-                rowsView?.addView(rowView(pane.rows[i], panel, i), LinearLayout.LayoutParams(-1, dp(22)))
+                rowsView?.addView(rowView(pane.rows[i], panel, i), LinearLayout.LayoutParams(-1, dp(if (pane.rows[i].isSection) 20 else FILE_ROW_HEIGHT_DP)))
             }
+            leftScrollView?.post { leftScrollView?.scrollTo(0, previousScroll) }
         }
-        keepSelectionVisible(panel)
+        if (panel == Panel.RIGHT) keepSelectionVisible(panel)
         val selected = pane.rows.getOrNull(pane.cursor)?.takeUnless { it.isSection }?.label ?: pane.directory.name
-        footer?.text = if (panel == Panel.RIGHT) "$selected  |  ${paneSummary(pane)}" else selected
-        disk?.text = if (panel == Panel.LEFT) "${pane.rows.count { it.file?.isDirectory == true }} locations" else diskSummary(pane.directory)
+        footer?.text = selected
+        footer?.contentDescription = "$selected. ${paneSummary(pane)}"
+        disk?.text = if (panel == Panel.LEFT) "${pane.rows.count { it.isDirectory && !it.isParent }} dirs" else diskSummary(pane.directory)
     }
 
-    private fun renderGrid() {
-        val grid = rightGridView ?: return
-        grid.numColumns = gridColumnCount()
-        val adapter = rightGridAdapter ?: RightGridAdapter().also { rightGridAdapter = it }
+    private fun renderFileList() {
+        val grid = rightListView ?: return
+        val adapter = rightListAdapter ?: RightListAdapter().also { rightListAdapter = it }
         if (grid.adapter !== adapter) grid.adapter = adapter
         adapter.notifyDataSetChanged()
         grid.post { grid.setSelection(rightPane.cursor) }
     }
 
-    private inner class RightGridAdapter : BaseAdapter() {
+    private inner class RightListAdapter : BaseAdapter() {
         override fun getCount(): Int = rightPane.rows.size
         override fun getItem(position: Int): Any = rightPane.rows[position]
         override fun getItemId(position: Int): Long = position.toLong()
 
         override fun getView(position: Int, convertView: View?, parent: android.view.ViewGroup?): View {
-            val cell = (convertView as? LinearLayout) ?: newGridCell()
-            bindGridCell(cell, rightPane.rows[position], position)
-            cell.layoutParams = AbsListView.LayoutParams(-1, dp(RIGHT_GRID_CELL_HEIGHT_DP))
+            val cell = (convertView as? LinearLayout) ?: newFileRow()
+            bindFileRow(cell, rightPane.rows[position], position)
+            cell.layoutParams = AbsListView.LayoutParams(-1, dp(FILE_ROW_HEIGHT_DP))
             return cell
         }
     }
 
-    private class GridCellHolder(val icon: TextView, val thumbnail: ImageView, val label: TextView)
+    private class FileRowHolder(val prefix: TextView, val label: TextView, val size: TextView, val date: TextView, val dateDivider: View)
 
-    private fun newGridCell(): LinearLayout {
+    private fun newFileRow(): LinearLayout {
         val cell = LinearLayout(this)
-        cell.id = R.id.fm_grid_cell
-        cell.orientation = LinearLayout.VERTICAL
-        cell.gravity = Gravity.CENTER
-        cell.setPadding(dp(3), dp(4), dp(3), dp(3))
-
-        val iconHost = FrameLayout(this)
-        val icon = glyphView("", iconColor(false), max(28, outputTextSizeSp + 13))
-        icon.gravity = Gravity.CENTER
-        val thumbnail = ImageView(this)
-        thumbnail.scaleType = ImageView.ScaleType.CENTER_INSIDE
-        thumbnail.visibility = View.GONE
-        iconHost.addView(icon, FrameLayout.LayoutParams(-1, -1))
-        iconHost.addView(thumbnail, FrameLayout.LayoutParams(-1, -1))
-        val iconParams = LinearLayout.LayoutParams(-1, dp(36))
-        iconParams.bottomMargin = dp(1)
-        cell.addView(iconHost, iconParams)
-
-        val text = label("", max(9, outputTextSizeSp - 3), false)
-        text.setSingleLine(false)
-        text.maxLines = 2
-        text.gravity = Gravity.CENTER
-        text.ellipsize = TextUtils.TruncateAt.END
-        cell.addView(text, LinearLayout.LayoutParams(-1, 0, 1f))
-
-        cell.tag = GridCellHolder(icon, thumbnail, text)
+        cell.id = R.id.fm_file_row
+        cell.orientation = LinearLayout.HORIZONTAL
+        cell.gravity = Gravity.CENTER_VERTICAL
+        val prefix = label("", outputTextSizeSp, true)
+        prefix.gravity = Gravity.CENTER_VERTICAL
+        cell.addView(prefix, LinearLayout.LayoutParams(dp(12), -1))
+        val text = label("", outputTextSizeSp, false)
+        text.gravity = Gravity.CENTER_VERTICAL
+        text.ellipsize = TextUtils.TruncateAt.MIDDLE
+        text.setPadding(dp(2), 0, dp(2), 0)
+        cell.addView(text, LinearLayout.LayoutParams(0, -1, 1f))
+        fun divider() = View(this).apply { setBackgroundColor(withAlpha(outputBorderColor, 110)) }
+        val nameDivider = divider()
+        cell.addView(nameDivider, LinearLayout.LayoutParams(max(1, dp(1)), -1))
+        val size = label("", outputTextSizeSp, false)
+        size.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        size.setPadding(0, 0, dp(4), 0)
+        cell.addView(size, LinearLayout.LayoutParams(dp(54), -1))
+        val dateDivider = divider()
+        cell.addView(dateDivider, LinearLayout.LayoutParams(max(1, dp(1)), -1))
+        val date = label("", outputTextSizeSp, false)
+        date.gravity = Gravity.CENTER
+        cell.addView(date, LinearLayout.LayoutParams(dp(84), -1))
+        cell.tag = FileRowHolder(prefix, text, size, date, dateDivider)
         return cell
     }
 
-    private fun bindGridCell(cell: LinearLayout, entry: FileEntry, index: Int) {
-        val selected = (entry.archivePath ?: entry.file?.absolutePath) in selectedPaths ||
-            selectedPaths.isEmpty() && pendingCopyPaths.isEmpty() && pendingMovePaths.isEmpty() && showRightCursorHighlight &&
-            activePanel == Panel.RIGHT && index == rightPane.cursor
+    private fun bindFileRow(cell: LinearLayout, entry: FileEntry, index: Int) {
+        val marked = (entry.archivePath ?: entry.file?.absolutePath) in selectedPaths
+        val cursor = pendingCopyPaths.isEmpty() && pendingMovePaths.isEmpty() &&
+            showRightCursorHighlight && activePanel == Panel.RIGHT && index == rightPane.cursor
+        val selected = marked || selectedPaths.isEmpty() && cursor
         val color = rowTextColor(selected, entry.isDirectory)
-        val iconColor = iconColor(selected)
         cell.background = rowSelectionBackground(selected)
-        val holder = cell.tag as GridCellHolder
-        holder.icon.text = fileGlyph(entry, selected)
-        holder.thumbnail.visibility = View.GONE
-        holder.thumbnail.setImageDrawable(null)
-        holder.thumbnail.tag = null
-        holder.icon.setTextColor(iconColor)
-        holder.icon.setTextSize(scaledFontSp(max(28, outputTextSizeSp + 13), fontScaleOffsetSp))
-        holder.icon.typeface = nerdTypeface()
+        val holder = cell.tag as FileRowHolder
+        holder.date.visibility = if (showModifiedColumn) View.VISIBLE else View.GONE
+        holder.dateDivider.visibility = holder.date.visibility
+        val prefix = if (marked) "*" else if (entry.isDirectory) "/" else " "
+        holder.prefix.text = prefix
+        holder.prefix.setTextColor(color)
         holder.label.text = if (entry.isParent) ".." else entry.label
         holder.label.isSelected = selected
         holder.label.setTextColor(color)
-        holder.label.setTextSize(scaledFontSp(max(9, outputTextSizeSp - 3), fontScaleOffsetSp))
         holder.label.setTypeface(appTypeface ?: Typeface.MONOSPACE, if (entry.isDirectory) Typeface.BOLD else Typeface.NORMAL)
+        holder.size.text = when {
+            entry.isParent -> "UP-DIR"
+            entry.isDirectory -> "SUB-DIR"
+            entry.file != null -> humanSize(entry.file.length())
+            entry.providerItem != null || entry.archivePath != null -> humanSize(entry.size)
+            else -> ""
+        }
+        holder.size.setTextColor(color)
+        val modified = entry.file?.lastModified() ?: entry.providerItem?.modified ?: 0L
+        holder.date.text = if (modified > 0) java.text.SimpleDateFormat("MMM dd HH:mm", Locale.getDefault()).format(java.util.Date(modified)) else ""
+        holder.date.setTextColor(if (selected) selectionTextColor else withAlpha(color, 180))
+        commanderFileStyle(entry, marked, cursor)?.let { style ->
+            cell.setBackgroundColor(style.background)
+            listOf(holder.prefix, holder.label, holder.size, holder.date).forEach { styleCommanderText(it, style) }
+        }
         cell.contentDescription = when {
             entry.isParent -> "Parent folder"
-            entry.isSection -> entry.label
             entry.isDirectory -> "Folder ${entry.label}"
             else -> "File ${entry.label}"
-        }
-        val file = entry.file
-        val provider = entry.providerItem
-        val thumbnailFile = file ?: provider?.let { File(it.name) }
-        if (!selected && thumbnailFile != null && (file?.isFile == true || provider != null) && supportsThumbnail(thumbnailFile)) {
-            val key = entry.contentUri?.toString() ?: thumbnailFile.absolutePath
-            holder.thumbnail.tag = key
-            ThumbnailLoader.load(this, thumbnailFile, entry.contentUri, dp(34)) { bitmap ->
-                if (holder.thumbnail.tag == key && bitmap != null) {
-                    holder.icon.text = ""
-                    holder.thumbnail.setImageBitmap(bitmap)
-                    holder.thumbnail.visibility = View.VISIBLE
-                }
-            }
-        }
-    }
-
-    private fun supportsThumbnail(file: File): Boolean {
-        val ext = file.extension.lowercase(Locale.US)
-        return ext in IMAGE_EXTENSIONS || ext in VIDEO_EXTENSIONS || ext in AUDIO_EXTENSIONS || ext == "pdf"
+        } + if (marked) ", marked" else ""
     }
 
     private fun rowView(entry: FileEntry, panel: Panel, index: Int): View {
@@ -1775,12 +1928,21 @@ open class MainActivity : Activity() {
         row.setPadding(dp(2), 0, dp(2), 0)
         row.background = rowSelectionBackground(selected)
         row.setOnClickListener {
+            val key = entry.providerItem?.uri?.toString() ?: entry.file?.absolutePath ?: entry.label
+            val open = panel != Panel.LEFT || (activePanel == Panel.LEFT && tappedLeftEntry == key)
             activePanel = panel
             pane(panel).cursor = index
             clampCursor(pane(panel))
-            if (panel == Panel.RIGHT && (shareSelectionMode || selectedPaths.isNotEmpty())) toggleSelection(entry) else openSelected()
+            if (panel == Panel.LEFT) {
+                tappedLeftEntry = key
+                renderPane(Panel.LEFT)
+                refreshSelectionHighlights()
+                updateAddressBar()
+                if (open) openSelected()
+            } else if (shareSelectionMode || selectedPaths.isNotEmpty()) toggleSelection(entry) else openSelected()
         }
         row.setOnLongClickListener {
+            tappedLeftEntry = null
             activePanel = panel
             pane(panel).cursor = index
             entry.file?.let {
@@ -1796,6 +1958,7 @@ open class MainActivity : Activity() {
     }
 
     private fun moveCursor(delta: Int) {
+        tappedLeftEntry = null
         val pane = activePane()
         if (pane.rows.isEmpty()) return
         if (activePanel == Panel.RIGHT) showRightCursorHighlight = true
@@ -1808,20 +1971,25 @@ open class MainActivity : Activity() {
         }
         if (target in pane.rows.indices) pane.cursor = target
         renderActivePane()
+        keepSelectionVisible(activePanel)
     }
 
     private fun cursorHome() {
         val pane = activePane()
         if (activePanel == Panel.RIGHT) showRightCursorHighlight = true
         pane.cursor = pane.rows.indexOfFirst { !it.isSection }.takeIf { it >= 0 } ?: 0
+        tappedLeftEntry = null
         renderActivePane()
+        keepSelectionVisible(activePanel)
     }
 
     private fun cursorEnd() {
         val pane = activePane()
         if (activePanel == Panel.RIGHT) showRightCursorHighlight = true
         pane.cursor = pane.rows.indexOfLast { !it.isSection }.takeIf { it >= 0 } ?: max(0, pane.rows.size - 1)
+        tappedLeftEntry = null
         renderActivePane()
+        keepSelectionVisible(activePanel)
     }
 
     private fun clampCursor(pane: PaneState) {
@@ -1845,26 +2013,25 @@ open class MainActivity : Activity() {
     }
 
     private fun visibleRowCount(panel: Panel): Int {
-        val height = if (panel == Panel.RIGHT) rightGridView?.height ?: 0 else leftScrollView?.height ?: 0
+        val height = if (panel == Panel.RIGHT) rightListView?.height ?: 0 else leftScrollView?.height ?: 0
         if (panel == Panel.RIGHT) {
-            val columns = gridColumnCount()
-            val rowHeight = max(1, dp(RIGHT_GRID_CELL_HEIGHT_DP))
-            val rows = if (height > 0) height / rowHeight else 6
-            return max(columns, rows * columns)
+            val rowHeight = max(1, dp(FILE_ROW_HEIGHT_DP))
+            return max(1, if (height > 0) height / rowHeight else 6)
         }
-        val rowHeight = max(1, dp(22))
+        val rowHeight = max(1, dp(FILE_ROW_HEIGHT_DP))
         return max(1, if (height > 0) height / rowHeight else 18)
     }
 
     private fun keepSelectionVisible(panel: Panel) {
         val pane = pane(panel)
         if (panel == Panel.RIGHT) {
-            rightGridView?.post { rightGridView?.setSelection(pane.cursor) }
+            rightListView?.post { rightListView?.setSelection(pane.cursor) }
             return
         }
         val scroll = leftScrollView
-        val itemHeight = if (panel == Panel.RIGHT) dp(RIGHT_GRID_CELL_HEIGHT_DP) else dp(22)
-        val itemTop = if (panel == Panel.RIGHT) (pane.cursor / gridColumnCount()) * itemHeight else pane.cursor * itemHeight
+        val item = leftRowsView?.getChildAt(pane.cursor)
+        val itemHeight = item?.height ?: dp(FILE_ROW_HEIGHT_DP)
+        val itemTop = item?.top ?: pane.cursor * itemHeight
         scroll?.post {
             val height = scroll.height
             if (height <= 0) return@post
@@ -1877,12 +2044,6 @@ open class MainActivity : Activity() {
             }
             if (target != top) scroll.scrollTo(0, max(0, target))
         }
-    }
-
-    private fun gridColumnCount(): Int {
-        val width = rightGridView?.width ?: 0
-        val minCellWidth = max(1, dp(RIGHT_GRID_MIN_CELL_WIDTH_DP))
-        return max(2, if (width > 0) width / minCellWidth else 3)
     }
 
     private fun openSelected() {
@@ -1902,7 +2063,7 @@ open class MainActivity : Activity() {
         }
         val file = entry.file ?: return
         if (activePanel == Panel.LEFT) {
-            if (entry.isParent) navigateMain(file) else if (entry.isDirectory) showDirectoryContents(file)
+            if (entry.isDirectory) showDirectoryContents(file)
         } else if (entry.isDirectory) {
             showDirectoryContents(file)
         } else {
@@ -1917,7 +2078,7 @@ open class MainActivity : Activity() {
             return
         }
         val backend = if (activeProvider?.rootUri == providerRoot) activeProvider!! else SafStorageBackend(this, providerRoot)
-        if (currentScreen != Screen.TREE || leftRowsView == null || rightGridView == null) {
+        if (currentScreen != Screen.TREE || leftRowsView == null || rightListView == null) {
             currentScreen = Screen.TREE
             contentHost?.removeAllViews()
             contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
@@ -2082,6 +2243,7 @@ open class MainActivity : Activity() {
     }
 
     private fun switchPanel(panel: Panel) {
+        tappedLeftEntry = null
         activePanel = panel
         if (panel == Panel.RIGHT) showRightCursorHighlight = true
         renderAll()
@@ -2325,12 +2487,12 @@ open class MainActivity : Activity() {
     }
 
     private fun refreshSelectionHighlights() {
-        val grid = rightGridView ?: return
+        val grid = rightListView ?: return
         val first = grid.firstVisiblePosition
         repeat(grid.childCount) { offset ->
             val position = first + offset
             val cell = grid.getChildAt(offset) as? LinearLayout ?: return@repeat
-            rightPane.rows.getOrNull(position)?.let { bindGridCell(cell, it, position) }
+            rightPane.rows.getOrNull(position)?.let { bindFileRow(cell, it, position) }
         }
     }
 
@@ -3673,7 +3835,7 @@ open class MainActivity : Activity() {
     }
 
     private fun showFindRows(query: String, root: File, rows: List<FileEntry>) {
-        if (currentScreen != Screen.TREE || leftRowsView == null || rightGridView == null) {
+        if (currentScreen != Screen.TREE || leftRowsView == null || rightListView == null) {
             currentScreen = Screen.TREE
             contentHost?.removeAllViews()
             contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
@@ -3794,13 +3956,14 @@ open class MainActivity : Activity() {
         panel.background = panelDrawable(PanelRole.OUTPUT)
 
         val heading = label(title, max(14, outputTextSizeSp + 1), true)
+        heading.tag = "commander-title"
         heading.gravity = Gravity.CENTER_VERTICAL or Gravity.START
         heading.setTextColor(headerTextColor)
         panel.addView(heading, LinearLayout.LayoutParams(-1, dp(34)))
         return panel
     }
 
-    private inner class PaneDialog(val host: FrameLayout, val view: View, val returnHome: Boolean) {
+    private inner class PaneDialog(var host: FrameLayout, val view: View, val returnHome: Boolean) {
         fun dismiss() {
             if (paneDialog !== this) return
             (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
@@ -3808,7 +3971,9 @@ open class MainActivity : Activity() {
             host.removeView(view)
             host.getChildAt(0)?.visibility = View.VISIBLE
             paneDialog = null
-            if (returnHome) showHome(recordHistory = false) else updateSelectionBar()
+            if (returnHome) showHome(recordHistory = false)
+            else if (pendingPaneRelayout) reflowTreePanes()
+            else updateSelectionBar()
         }
     }
 
@@ -3817,26 +3982,14 @@ open class MainActivity : Activity() {
         val returnHome = currentScreen == Screen.HOME
         if (returnHome) showTree(rightPane.directory, recordHistory = false)
         val host = requireNotNull(rightWorkspace)
-        val background = outputPanelColor or 0xff000000.toInt()
-        val foreground = outputTextColor or 0xff000000.toInt()
-        val readable = if (androidx.core.graphics.ColorUtils.calculateContrast(foreground, background) >= 4.5) foreground
-            else if (androidx.core.graphics.ColorUtils.calculateLuminance(background) > 0.179) Color.BLACK else Color.WHITE
-        fun style(view: View) {
-            if (view is TextView) {
-                view.setTextColor(readable)
-                view.setHintTextColor(readable)
-                if (view.isClickable || view is EditText) view.setBackgroundColor(background)
-            }
-            if (view is android.view.ViewGroup) for (i in 0 until view.childCount) style(view.getChildAt(i))
-        }
-        style(panel)
-        panel.setBackgroundColor(background)
+        val background = styleDialogPanel(panel)
         val scroll = ScrollView(this)
         scroll.isFillViewport = true
         scroll.setBackgroundColor(background)
         scroll.addView(panel, FrameLayout.LayoutParams(-1, -2))
         host.getChildAt(0)?.visibility = View.GONE
         selectionBar?.visibility = View.GONE
+        selectionSurface?.visibility = View.GONE
         host.addView(scroll, FrameLayout.LayoutParams(-1, -1))
         val dialog = PaneDialog(host, scroll, returnHome)
         paneDialog = dialog
@@ -3846,6 +3999,40 @@ open class MainActivity : Activity() {
                 .showSoftInput(focus, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
         }
         return dialog
+    }
+
+    private fun styleDialogPanel(panel: View): Int {
+        val section = (panel.tag as? String)?.takeIf { it == "menu" || it == "popupmenu" } ?: "dialog"
+        val dialogStyle = commanderSkin?.style(section)?.displayed
+        val background = (dialogStyle?.background ?: outputPanelColor) or 0xff000000.toInt()
+        val foreground = (dialogStyle?.foreground ?: outputTextColor) or 0xff000000.toInt()
+        val readable = if (androidx.core.graphics.ColorUtils.calculateContrast(foreground, background) >= 4.5) foreground
+            else if (androidx.core.graphics.ColorUtils.calculateLuminance(background) > 0.179) Color.BLACK else Color.WHITE
+        fun style(view: View) {
+            if (view is TextView) {
+                view.setTextColor(readable)
+                view.setHintTextColor(readable)
+                if (view.isClickable || view is EditText) view.setBackgroundColor(background)
+                commanderSkin?.let { skin ->
+                    val role = when {
+                        view is EditText -> skin.style("core", "input")
+                        view.tag == "commander-title" -> skin.style(section, when (section) {
+                            "menu" -> "menuhot"
+                            "popupmenu" -> "menutitle"
+                            else -> "dtitle"
+                        })
+                        section != "dialog" -> skin.style(section)
+                        view.isClickable -> skin.style("dialog", "dfocus")
+                        else -> skin.style("dialog")
+                    }.displayed
+                    styleCommanderText(view, role, background = true)
+                }
+            }
+            if (view is android.view.ViewGroup) for (i in 0 until view.childCount) style(view.getChildAt(i))
+        }
+        style(panel)
+        panel.setBackgroundColor(background)
+        return background
     }
 
     private fun dialogButtonRow(): LinearLayout {
@@ -3917,13 +4104,15 @@ open class MainActivity : Activity() {
 
     private fun helpText(): String {
         return "Menus:\n" +
-            "File: new folder, open/share selected, refresh, close\n" +
-            "Edit: edit text, trash\n" +
-            "View: preview, search current folder, path, pane focus, refresh\n" +
-            "Go: up, home, storage root, set main dir\n" +
-            "Places: Home, Downloads, Documents, Pictures, Music\n" +
+            "Places: saved folders, recent folders, providers and folder browser\n" +
+            "File: view, edit, copy, move, trash, properties and selection\n" +
+            "Command: find file, parent folder, breadcrumbs, background jobs and file commands\n" +
+            "Options: appearance, panel options, settings\n" +
+            "Sort: name, modification date, size and file type\n" +
+            "\nTouch:\nTap a directory on the left to select it. Tap it again to show its contents on the right.\n" +
+            "Tap right-pane items to open; long-press to mark for batch actions.\n" +
             "\nSearch:\n" +
-            "Tap the path bar to search all phone storage by name.\n" +
+            "Open Command > Find file or Search device.\n" +
             "Long-press a folder and choose Search this folder to search inside it.\n" +
             "Add size>10M or size<500K for size limits.\n" +
             "Add newer>7d or older>12h for modified-date limits.\n" +
@@ -3933,16 +4122,16 @@ open class MainActivity : Activity() {
             "\nPrivacy:\n" +
             privacySummary() + "\n" +
             "\nCustomization:\n" +
-            "Follows Launcher themes and supports font choice/import, font scale, hidden files, sorting, and an adaptive grid.\n" +
+            "Follows Launcher themes and supports font choice/import, font scale, hidden files, and sorted file lists.\n" +
             "\nKeyboard:\n" +
-            "arrows move/open\n" +
+            "Up/Down move; Left/Right switch pane\n" +
             "Enter opens selected\n" +
             "Tab/Left switches pane"
     }
 
     private fun showWalkthrough(step: Int = 0, firstRun: Boolean = false) {
         val pages = listOf(
-            "BROWSE\n\nUse Places on the left to choose a location. Folder contents stay on the right, so you can keep your bearings while you browse.",
+            "BROWSE\n\nTap a directory on the left to select it; tap it again to open it on the right. Folder contents stay on the right, so you can keep your bearings while you browse.",
             "SELECT AND ACT\n\nLong-press a file or folder to select it. Then copy, move, share, create a ZIP, or send it to Trash. Transfers show progress and can be cancelled.",
             "FIND YOUR FILES\n\nSearch by name or type, and add filters such as size>10M, size<500K, newer>7d, or older>12h.\n\nAndroid storage access is needed for browsing and managing files across phone and removable storage. You remain in control of that permission."
         )
@@ -4027,6 +4216,10 @@ open class MainActivity : Activity() {
     private fun addMenuButton(parent: LinearLayout, text: String, action: () -> Unit) {
         val view = label(text, outputTextSizeSp, true)
         view.id = when (text.lowercase(Locale.US)) {
+            "left" -> R.id.fm_menu_left
+            "right" -> R.id.fm_menu_right
+            "command" -> R.id.fm_menu_command
+            "options" -> R.id.fm_menu_options
             "file" -> R.id.fm_menu_file
             "edit" -> R.id.fm_menu_edit
             "view" -> R.id.fm_menu_view
@@ -4035,19 +4228,25 @@ open class MainActivity : Activity() {
             "help" -> R.id.fm_menu_help
             else -> View.generateViewId()
         }
-        view.gravity = Gravity.CENTER_VERTICAL
+        view.gravity = Gravity.CENTER
         view.setTextColor(moduleButtonTextColor)
         view.contentDescription = "$text menu"
+        commanderSkin?.style("menu", "menuinactive")?.displayed?.let { styleCommanderText(view, it, background = true) }
         view.setOnClickListener { action() }
-        val params = LinearLayout.LayoutParams(-2, -1)
-        params.rightMargin = dp(12)
-        parent.addView(view, params)
+        parent.addView(view, LinearLayout.LayoutParams(0, -1, 1f))
     }
 
     private fun showFileMenu() {
         showActionMenu(
             "File",
             listOf(
+                "View  F3" to { runFunctionAction(3) },
+                "Properties" to { withSelected("PROPERTIES") { showProperties(it) } },
+                "Edit  F4" to { runFunctionAction(4) },
+                "Copy  F5" to { runFunctionAction(5) },
+                "Rename/Move  F6" to { runFunctionAction(6) },
+                "Trash  F8" to { runFunctionAction(8) },
+                "Selection and more" to { showEditMenu() },
                 "Storage access" to { ensureStorageAccess(userInitiated = true) },
                 "Add provider folder" to { pickProviderRoot() },
                 "Job center" to { showOperationCenter() },
@@ -4057,7 +4256,7 @@ open class MainActivity : Activity() {
                 "Share selected file" to { withSelected("SHARE") { shareFile(it) } },
                 "Empty trash" to { confirmEmptyTrash() },
                 "Refresh" to { reloadAll() },
-                "Settings" to { showSettingsMenu() },
+                "Settings" to { appearanceReturnForm = null; showSettingsMenu() },
                 "Close FM" to { finish() }
             )
         )
@@ -4123,6 +4322,63 @@ open class MainActivity : Activity() {
         return "$completed/$total complete$bytes${if (message.isBlank()) "" else "\n$message"}"
     }
 
+    private fun showFolderBrowserMenu() {
+        showActionMenu("Folder browser", listOf(
+            "Open selected folder on right" to { activePanel = Panel.LEFT; openSelected() },
+            "Browse selected folder" to { selectedLeftDirectory()?.let(::browseLeftDirectory) },
+            "Parent folder" to { leftPane.directory.parentFile?.let(::browseLeftDirectory) },
+            "Places" to { showPlacesMenu() },
+            "Recent folders" to { showRecentMenu() },
+            "Refresh" to { reloadPane(leftPane); renderPane(Panel.LEFT) }
+        ))
+    }
+
+    private fun selectedLeftDirectory(): File? = leftPane.rows.getOrNull(leftPane.cursor)?.file?.takeIf { it.isDirectory }
+
+    private fun browseLeftDirectory(dir: File) {
+        if (!dir.canRead()) return showStorageProblem(dir)
+        tappedLeftEntry = null
+        leftPane.directory = dir
+        leftPane.cursor = 0
+        reloadPane(leftPane)
+        renderPane(Panel.LEFT)
+        leftScrollView?.post { leftScrollView?.scrollTo(0, 0) }
+        updateAddressBar()
+    }
+
+    private fun showCommandMenu() {
+        showActionMenu("Command", listOf(
+            "Folder browser" to { showFolderBrowserMenu() },
+            "Parent folder" to { goParent() },
+            "Path and breadcrumbs" to { showBreadcrumbMenu() },
+            "Find file" to { promptSearch(contentPane().directory, "Find file") },
+            "Search device" to { promptSearch(null, "Search device") },
+            "Places" to { showPlacesMenu() },
+            "Recent folders" to { showRecentMenu() },
+            "Background jobs" to { showOperationCenter() },
+            "File commands" to { promptCommand() },
+            "Categories and storage" to { showHome() }
+        ))
+    }
+
+    private fun showOptionsMenu() {
+        fun hasInput(view: View): Boolean = view is EditText ||
+            (view is android.view.ViewGroup && (0 until view.childCount).any { hasInput(view.getChildAt(it)) })
+        paneDialog?.takeIf { hasInput(it.view) }?.let { form ->
+            appearanceReturnForm = form
+            (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                .hideSoftInputFromWindow(form.view.windowToken, 0)
+            form.host.removeView(form.view)
+            paneDialog = null
+        }
+        showActionMenu("Options", listOf(
+            "Appearance" to { showAppearanceMenu() },
+            "Panel options" to { appearanceReturnForm = null; showViewMenu() },
+            "Settings" to { appearanceReturnForm = null; showSettingsMenu() },
+            "Help" to { appearanceReturnForm = null; showHelpPopup() }
+        ))
+    }
+
     private fun showSettingsMenu() {
         val days = themePrefs().getInt(PREF_TRASH_RETENTION_DAYS, DEFAULT_TRASH_RETENTION_DAYS)
         val value = if (days <= 0) "Never" else "$days days"
@@ -4144,18 +4400,21 @@ open class MainActivity : Activity() {
         val launcherAvailable = prefs.getBoolean(PREF_LAUNCHER_THEME_AVAILABLE, false) ||
             prefs.contains(RetuiVisualContract.BG)
         val source = when {
-            overridden -> "Files override"
-            launcherAvailable -> "Re:TUI Launcher"
-            else -> "Files default"
+            overridden -> "Custom colors"
+            commanderSkin != null -> commanderSkin!!.id
+            launcherAvailable -> "MC body / Launcher frame"
+            else -> "MC default"
         }
         val items = mutableListOf<Pair<String, () -> Unit>>()
         items += "Theme source: $source" to {
             showOutput("THEME SOURCE", "Using $source colors.")
         }
-        items += "Follow Re:TUI Launcher colors" to {
-            if (launcherAvailable) clearThemeColorOverride()
-            else showOutput("APPEARANCE", "Open Re:TUI Launcher first so Files can receive its theme.")
+        items += "MC skins (${commanderSkins.size})" to { showCommanderSkinPicker() }
+        items += "MC skin credits & license" to {
+            val license = assets.open("mc-skins/LICENSE.txt").bufferedReader().use { it.readText() }
+            showOutput("MC SKIN CREDITS", "Midnight Commander skin collection\nhttps://github.com/MidnightCommander/mc\n\nOriginal author credits are preserved in the bundled skin files.\n\n$license")
         }
+        items += "Use Re:TUI gray colors" to { applyCommanderSkin(null) }
         themeColorBindings().forEach { binding ->
             items += "${binding.label}: ${colorHex(binding.get())}" to { showThemeColorEditor(binding) }
         }
@@ -4166,6 +4425,125 @@ open class MainActivity : Activity() {
         items += "Font: ${currentFontModeLabel()}" to { showFontMenu() }
         items += "Font scale: ${fontScaleLabel(fontScaleOffsetSp)}" to { showFontScaleMenu() }
         showActionMenu("Appearance", items)
+    }
+
+    private fun showCommanderSkinPicker() {
+        val skins = listOf<CommanderSkin?>(null) + commanderSkins
+        var chosen = skins.indexOfFirst { it?.id == themePrefs().getString(PREF_COMMANDER_SKIN, null) }.coerceAtLeast(0)
+        val panel = dialogPanel("MC skins")
+        val name = label("", outputTextSizeSp, true)
+        name.setSingleLine(false)
+        panel.addView(name, LinearLayout.LayoutParams(-1, dp(48)))
+        val preview = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            contentDescription = "Skin preview"
+        }
+        val samples = listOf("Places File Command", "/storage  →", "Name       Size", "/Download  SUB-DIR", "*notes.txt     2K", " readme.md     1K", "1 Help  5 Copy  8 Trash")
+            .map { text -> label(text, 9, false).also { preview.addView(it, LinearLayout.LayoutParams(-1, dp(20))) } }
+        panel.addView(preview, LinearLayout.LayoutParams(-1, dp(150)))
+        val list = ListView(this).apply {
+            divider = null
+            contentDescription = "MC skin collection"
+        }
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = skins.size
+            override fun getItem(position: Int) = skins[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: android.view.ViewGroup?): View {
+                val row = (convertView as? TextView) ?: label("", outputTextSizeSp, false).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(4), 0, dp(4), 0)
+                    ellipsize = TextUtils.TruncateAt.END
+                    layoutParams = AbsListView.LayoutParams(-1, dp(40))
+                }
+                row.text = (if (position == chosen) "● " else "  ") + (skins[position]?.id ?: "Re:TUI gray")
+                row.contentDescription = skins[position]?.let { "${it.id}, ${it.description}" } ?: "Re:TUI gray"
+                row.setTextColor(if (position == chosen) selectionTextColor else outputTextColor)
+                row.setBackgroundColor(if (position == chosen) selectionBgColor else outputPanelColor)
+                return row
+            }
+        }
+        list.adapter = adapter
+        panel.addView(list, LinearLayout.LayoutParams(-1, dp(240)))
+        fun renderPreview() {
+            val skin = skins[chosen]
+            name.text = skin?.let { "${it.id}\n${it.colorMode}" } ?: "Re:TUI gray\nCurrent compact palette"
+            val core = skin?.style("core")?.displayed ?: CommanderStyle(Color.rgb(210, 210, 210), Color.rgb(55, 55, 55))
+            val selected = skin?.style("core", "selected")?.displayed ?: CommanderStyle(Color.WHITE, Color.rgb(0, 96, 96))
+            val directory = skin?.style("filehighlight", "directory")?.displayed ?: core.copy(foreground = Color.rgb(200, 196, 151))
+            val styles = listOf(skin?.style("menu", "menuinactive")?.displayed ?: core,
+                skin?.style("core", "reverse")?.displayed ?: selected,
+                skin?.style("core", "header")?.displayed ?: directory, directory,
+                skin?.style("core", "marked")?.displayed ?: directory, selected,
+                skin?.style("buttonbar", "button")?.displayed ?: core)
+            samples.zip(styles).forEach { (view, style) -> styleCommanderText(view, style, background = true) }
+            val border = skin?.style("core", "frame")?.displayed?.foreground ?: Color.LTGRAY
+            preview.background = CommanderFrameDrawable(core.background, border, dpFloat(1f), skin?.doubleFrame == true)
+            adapter.notifyDataSetChanged()
+        }
+        list.setOnItemClickListener { _, _, position, _ -> chosen = position; renderPreview() }
+        lateinit var dialog: PaneDialog
+        val buttons = dialogButtonRow()
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss(); restoreAppearanceForm() }
+        addDialogButton(buttons, "APPLY") { dialog.dismiss(); applyCommanderSkin(skins[chosen]) }
+        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
+        dialog = showDialogPanel(panel)
+        renderPreview()
+        list.setSelection(chosen)
+    }
+
+    private fun applyCommanderSkin(skin: CommanderSkin?) {
+        val prefs = themePrefs()
+        val editor = prefs.edit().putBoolean(PREF_THEME_COLORS_OVERRIDDEN, false)
+        if (skin == null) editor.remove(PREF_COMMANDER_SKIN) else editor.putString(PREF_COMMANDER_SKIN, skin.id)
+        themeColorBindings().forEach { editor.remove(PREF_THEME_COLOR_PREFIX + it.key) }
+        editor.apply()
+        refreshThemeUi()
+    }
+
+    private fun refreshThemeUi() {
+        val leftScroll = leftScrollView?.scrollY ?: 0
+        val first = rightListView?.firstVisiblePosition ?: 0
+        val offset = rightListView?.getChildAt(0)?.top ?: 0
+        applyThemeExtras(null)
+        rightListAdapter = null
+        setContentView(buildUi())
+        if (currentScreen == Screen.HOME) showHome(recordHistory = false)
+        else {
+            contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
+            renderAll()
+            updateSelectionBar()
+            leftScrollView?.post { leftScrollView?.scrollTo(0, leftScroll) }
+            rightListView?.post { rightListView?.setSelectionFromTop(first, offset) }
+        }
+        restoreAppearanceForm()
+    }
+
+    private fun restoreAppearanceForm() {
+        val form = appearanceReturnForm ?: return
+        appearanceReturnForm = null
+        paneDialog?.dismiss()
+        val host = rightWorkspace ?: return
+        (form.view.parent as? android.view.ViewGroup)?.removeView(form.view)
+        form.host = host
+        val scroll = form.view as ScrollView
+        scroll.setBackgroundColor(styleDialogPanel(scroll.getChildAt(0)))
+        host.getChildAt(0)?.visibility = View.GONE
+        selectionBar?.visibility = View.GONE
+        selectionSurface?.visibility = View.GONE
+        host.addView(form.view, FrameLayout.LayoutParams(-1, -1))
+        paneDialog = form
+    }
+
+    private fun styleCommanderText(view: TextView, style: CommanderStyle, background: Boolean = false) {
+        view.setTextColor(style.foreground)
+        if (background) view.setBackgroundColor(style.background)
+        val fontStyle = (if ("bold" in style.attributes) Typeface.BOLD else 0) or
+            (if ("italic" in style.attributes) Typeface.ITALIC else 0)
+        view.setTypeface(appTypeface ?: Typeface.MONOSPACE, fontStyle)
+        view.paintFlags = if ("underline" in style.attributes) view.paintFlags or Paint.UNDERLINE_TEXT_FLAG
+            else view.paintFlags and Paint.UNDERLINE_TEXT_FLAG.inv()
     }
 
     private fun showThemeColorEditor(binding: ThemeColorBinding) {
@@ -4222,7 +4600,7 @@ open class MainActivity : Activity() {
 
         lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
-        addDialogButton(buttons, "CANCEL") { dialog.dismiss() }
+        addDialogButton(buttons, "CANCEL") { dialog.dismiss(); restoreAppearanceForm() }
         addDialogButton(buttons, "APPLY") {
             val parsed = RetuiVisualContract.parseColor(input.text.toString())
             if (parsed == null) {
@@ -4232,7 +4610,7 @@ open class MainActivity : Activity() {
             binding.set(parsed)
             saveThemeColorOverride()
             dialog.dismiss()
-            recreate()
+            refreshThemeUi()
         }
         panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
         render(color)
@@ -4276,7 +4654,10 @@ open class MainActivity : Activity() {
     }
 
     private fun toggleLauncherFrames(current: Boolean) {
-        if (LauncherFrameStore(this).setAccepted(!current)) recreate()
+        if (LauncherFrameStore(this).setAccepted(!current)) {
+            launcherFrameRuntime = FilesFrameRuntime.load(this)
+            refreshThemeUi()
+        }
         else Toast.makeText(this, "Could not save frame setting.", Toast.LENGTH_SHORT).show()
     }
 
@@ -4285,7 +4666,7 @@ open class MainActivity : Activity() {
             "Font",
             listOf(
                 "Import custom .ttf or .otf" to { launchFontImportPicker() },
-                "Follow Launcher" to { setFontOverride(null) },
+                "Follow Launcher" to { setFontOverride(FONT_MODE_LAUNCHER) },
                 "Use system font" to { setFontOverride(FONT_MODE_SYSTEM) },
                 "Use Re:T-UI monospace" to { setFontOverride(FONT_MODE_DEFAULT) }
             )
@@ -4384,8 +4765,8 @@ open class MainActivity : Activity() {
     private fun currentFontModeLabel(): String = when (themePrefs().getString(PREF_FONT_MODE, null)) {
         FONT_MODE_CUSTOM -> File(themePrefs().getString(PREF_CUSTOM_FONT_PATH, "").orEmpty()).name.ifBlank { "Custom" }
         FONT_MODE_SYSTEM -> "System"
-        FONT_MODE_DEFAULT -> "Re:T-UI monospace"
-        else -> "Follow Launcher"
+        FONT_MODE_LAUNCHER -> "Follow Launcher"
+        else -> "Re:T-UI monospace"
     }
 
     private fun showTrashRetentionMenu() {
@@ -4407,7 +4788,7 @@ open class MainActivity : Activity() {
 
     private fun showEditMenu() {
         showActionMenu(
-            "Edit",
+            "Selection and actions",
             listOf(
                 "Rename selected" to { withSelected("RENAME") { promptRename(it) } },
                 "Batch rename selected" to { promptBatchRename() },
@@ -4415,6 +4796,9 @@ open class MainActivity : Activity() {
                 "Properties" to { withSelected("PROPERTIES") { showProperties(it) } },
                 "Select all" to { selectVisible(false) },
                 "Invert selection" to { selectVisible(true) },
+                "Clear selection" to { clearSelection() },
+                "Share marked files" to { shareSelectedFiles() },
+                "ZIP marked files" to { promptZipSelected() },
                 "Edit selected text" to { withSelected("EDIT") { editFile(it) } },
                 "Move selected to trash" to { withSelected("TRASH") { confirmDelete(it) } }
             )
@@ -4454,11 +4838,13 @@ open class MainActivity : Activity() {
     }
 
     private fun showPlacesMenu() {
-        val items = placeEntries().mapNotNull { entry ->
+        val items = placeEntries(includeRecent = false).mapNotNull { entry ->
             if (entry.isTrashPlace) return@mapNotNull entry.label to { showTrashContents() }
             val file = entry.file ?: return@mapNotNull null
             entry.label to { showDirectoryContents(file) }
         }.toMutableList()
+        items.add(0, "Folder browser" to { showFolderBrowserMenu() })
+        items.add(1, "Recent folders" to { showRecentMenu() })
         if (customPlacePaths().isNotEmpty()) {
             items += "Manage bookmarks" to {
                 showActionMenu("Remove bookmark", customPlacePaths().map { path ->
@@ -4508,10 +4894,14 @@ open class MainActivity : Activity() {
             return
         }
         val panel = dialogPanel(title)
+        panel.tag = if (title in setOf("Places", "File", "Command", "Options", "Sort order", "Menus")) "menu" else "popupmenu"
 
         lateinit var dialog: PaneDialog
         for ((text, action) in items) {
-            val row = label(text, outputTextSizeSp, true)
+            val row = label(text, max(11, outputTextSizeSp - 1), true)
+            row.setSingleLine(false)
+            row.maxLines = 2
+            row.ellipsize = TextUtils.TruncateAt.END
             row.gravity = Gravity.CENTER_VERTICAL or Gravity.START
             row.setPadding(dp(8), 0, dp(8), 0)
             row.setTextColor(moduleButtonTextColor)
@@ -4526,7 +4916,10 @@ open class MainActivity : Activity() {
         }
 
         val close = dialogButtonRow()
-        addDialogButton(close, "BACK") { dialog.dismiss() }
+        addDialogButton(close, "BACK") {
+            dialog.dismiss()
+            if (title == "Options" || title == "Appearance") restoreAppearanceForm()
+        }
         panel.addView(close)
         dialog = showDialogPanel(panel)
     }
@@ -4540,30 +4933,8 @@ open class MainActivity : Activity() {
         action(file)
     }
 
-    private fun addToolbarIconButton(parent: LinearLayout, iconRes: Int, description: String, action: () -> Unit) {
-        val view = ImageView(this)
-        view.setImageResource(iconRes)
-        view.setColorFilter(iconColor(false))
-        view.scaleType = ImageView.ScaleType.CENTER
-        view.contentDescription = description
-        view.id = when {
-            description.startsWith("Go to parent") -> R.id.fm_go_parent
-            description.startsWith("Go home") -> R.id.fm_go_home
-            description.startsWith("Create folder") -> R.id.fm_new_folder
-            description.startsWith("Refresh folder") -> R.id.fm_refresh
-            else -> View.generateViewId()
-        }
-        view.tooltipText = description
-        view.setPadding(dp(7), dp(5), dp(7), dp(5))
-        view.background = toolbarButtonDrawable()
-        view.setOnClickListener { action() }
-        val params = LinearLayout.LayoutParams(dp(36), -1)
-        params.rightMargin = dp(4)
-        parent.addView(view, params)
-    }
-
     private fun label(text: String?, sizeSp: Int, bold: Boolean): TextView {
-        val view = TextView(this)
+        val view = TerminalLabelView(this)
         view.text = text ?: ""
         view.setTextColor(outputTextColor)
         view.setTextSize(scaledFontSp(sizeSp, fontScaleOffsetSp))
@@ -4571,15 +4942,18 @@ open class MainActivity : Activity() {
         if (bold) view.setTypeface(view.typeface, Typeface.BOLD)
         view.includeFontPadding = false
         view.isSingleLine = true
+        // The terminal renderer uses the visible width, not TextView's scrolling single-line canvas.
+        view.setHorizontallyScrolling(false)
         return view
     }
 
     private fun column(text: String, weight: Float, gravity: Int): TextView {
-        val view = label(text, max(10, outputTextSizeSp - 2), true)
+        val view = label(text, outputTextSizeSp, true)
         view.gravity = gravity or Gravity.CENTER_VERTICAL
         view.setPadding(dp(2), 0, dp(2), 0)
         view.setTextColor(moduleTextColor)
         view.background = ColorDrawable(FmVisualInterop.scaleColorAlpha(modulePanelColor, 210))
+        commanderSkin?.style("core", "header")?.displayed?.let { styleCommanderText(view, it, background = true) }
         view.layoutParams = LinearLayout.LayoutParams(0, -1, weight)
         return view
     }
@@ -4598,12 +4972,31 @@ open class MainActivity : Activity() {
         return if (directory) directoryTextColor else fileTextColor
     }
 
+    private fun commanderFileStyle(entry: FileEntry, marked: Boolean, cursor: Boolean): CommanderStyle? {
+        val skin = commanderSkin ?: return null
+        if (marked) return skin.style("core", if (cursor) "markselect" else "marked").displayed
+        if (cursor) return skin.style("core", "selected").displayed
+        val ext = entry.label.substringAfterLast('.', "").lowercase(Locale.US)
+        val role = when {
+            entry.isDirectory -> "directory"
+            ext in ARCHIVE_EXTENSIONS -> "archive"
+            ext in IMAGE_EXTENSIONS -> "graph"
+            ext in VIDEO_EXTENSIONS || ext in AUDIO_EXTENSIONS -> "media"
+            ext in setOf("c", "h", "cpp", "hpp", "kt", "java", "py", "js", "ts", "sh", "lua", "rs", "go", "xml", "json", "yaml", "yml") -> "source"
+            ext in setOf("db", "sqlite", "sql") -> "database"
+            ext in setOf("tmp", "bak", "old") -> "temp"
+            ext in DOCUMENT_EXTENSIONS -> "doc"
+            entry.file?.canExecute() == true -> "executable"
+            else -> "_default_"
+        }
+        return skin.style("filehighlight", role).displayed
+    }
+
     private fun iconColor(selected: Boolean): Int {
         return if (selected) selectionTextColor else directoryTextColor
     }
 
     private fun rowSelected(entry: FileEntry, panel: Panel, index: Int): Boolean {
-        if ((entry.archivePath ?: entry.file?.absolutePath) in selectedPaths) return true
         if (panel == Panel.LEFT && activePanel != Panel.LEFT) {
             return entry.file?.absolutePath == rightPane.directory.absolutePath
         }
@@ -4639,7 +5032,6 @@ open class MainActivity : Activity() {
 
     private fun nameCell(entry: FileEntry, selected: Boolean): View {
         val color = rowTextColor(selected, entry.isDirectory)
-        val iconColor = iconColor(selected)
         val wrap = LinearLayout(this)
         wrap.id = R.id.fm_file_row
         wrap.contentDescription = when {
@@ -4651,51 +5043,22 @@ open class MainActivity : Activity() {
         wrap.gravity = Gravity.CENTER_VERTICAL
         wrap.setPadding(dp(2), 0, dp(2), 0)
 
-        wrap.addView(glyphView(fileGlyph(entry, selected), iconColor, max(13, outputTextSizeSp - 1)), LinearLayout.LayoutParams(dp(18), -1))
-
-        val text = label(if (entry.isParent) ".." else entry.label.take(24), max(10, outputTextSizeSp - 2), entry.isDirectory)
+        val prefix = label("/", outputTextSizeSp, true)
+        prefix.gravity = Gravity.CENTER_VERTICAL
+        prefix.setTextColor(color)
+        wrap.addView(prefix, LinearLayout.LayoutParams(dp(12), -1))
+        val text = label(if (entry.isParent) ".." else entry.label, outputTextSizeSp, entry.isDirectory)
         text.setTextColor(color)
         text.gravity = Gravity.START or Gravity.CENTER_VERTICAL
         text.setPadding(dp(3), 0, 0, 0)
         text.ellipsize = TextUtils.TruncateAt.END
         wrap.addView(text, LinearLayout.LayoutParams(0, -1, 1f))
+        commanderFileStyle(entry, false, selected)?.let { style ->
+            wrap.setBackgroundColor(style.background)
+            styleCommanderText(prefix, style)
+            styleCommanderText(text, style)
+        }
         return wrap
-    }
-
-    private fun fileGlyph(entry: FileEntry, selected: Boolean): String {
-        if (entry.isParent) return "↑"
-        if (entry.isTrashPlace) return ""
-        if (entry.isDirectory) return directoryGlyph(entry.file?.name ?: entry.label, selected)
-        val ext = (entry.file?.name ?: entry.label).lowercase(Locale.US).substringAfterLast('.', "")
-        return when (ext) {
-            "md", "markdown" -> ""
-            "txt", "log", "csv", "yaml", "yml", "toml", "ini", "conf", "ignore", "gitignore" -> ""
-            "xml", "html", "css", "js", "json", "kt", "java", "go", "rs", "py", "rb", "lua", "c", "cpp", "h" -> ""
-            "sh", "bash", "zsh", "fish" -> ""
-            "png", "jpg", "jpeg", "gif", "webp", "heic", "svg" -> ""
-            "mp3", "wav", "flac", "m4a", "ogg" -> ""
-            "mp4", "mkv", "mov", "avi", "webm" -> ""
-            "zip", "jar", "tar", "gz", "rar", "7z" -> ""
-            "apk" -> ""
-            "pdf" -> ""
-            "doc", "docx" -> ""
-            "xls", "xlsx" -> ""
-            "ppt", "pptx" -> ""
-            else -> ""
-        }
-    }
-
-    private fun directoryGlyph(name: String, selected: Boolean): String {
-        return when (name.lowercase(Locale.US)) {
-            ".git" -> ""
-            ".config", "config", "settings" -> ""
-            "documents" -> ""
-            "download", "downloads" -> ""
-            "music" -> ""
-            "pictures", "photos", "dcim" -> ""
-            "movies", "videos" -> ""
-            else -> if (selected) "" else ""
-        }
     }
 
     private fun glyphView(text: String, color: Int, sizeSp: Int): TextView {
@@ -4869,18 +5232,7 @@ open class MainActivity : Activity() {
         }
     }
 
-    private fun applyWallpaperBackground(root: View) {
-        if (!terminalBackgroundImage.isNullOrBlank()) {
-            val drawable = android.graphics.drawable.Drawable.createFromPath(terminalBackgroundImage)
-            if (drawable != null) {
-                root.background = drawable
-                return
-            }
-        }
-        root.setBackgroundColor(Color.TRANSPARENT)
-    }
-
-    private fun applyCrtForeground(root: FrameLayout) {
+    private fun applyCrtForeground(root: View) {
         root.foreground = if (crtFilter) {
             CrtOverlayDrawable(this, crtVignette).apply { setAccentColor(outputTextColor) }
         } else {
@@ -4908,6 +5260,11 @@ open class MainActivity : Activity() {
         applyStoredThemeColorOverride(prefs)
         applyLocalFontOverride(prefs)
         appTypeface = resolveTypeface()
+        launcherPanelColor = modulePanelColor
+        launcherPanelBorderColor = moduleBorderColor
+        launcherHeaderColor = headerPanelColor
+        launcherHeaderTextColor = headerTextColor
+        launcherHeaderTextSizeSp = headerTextSizeSp
         launcherFrameRuntime?.textColor?.takeUnless {
             prefs.getBoolean(PREF_THEME_COLORS_OVERRIDDEN, false)
         }?.let { color ->
@@ -4921,6 +5278,55 @@ open class MainActivity : Activity() {
             headerTextColor = color
             moduleButtonTextColor = color
         }
+        applyCommanderPalette()
+    }
+
+    private fun applyCommanderPalette() {
+        outputTextSizeSp = 11
+        headerTextSizeSp = 11
+        inputFontSizeSp = 11
+        commanderSkin = null
+        if (themePrefs().getBoolean(PREF_THEME_COLORS_OVERRIDDEN, false)) return
+        commanderSkin = commanderSkins.firstOrNull { it.id == themePrefs().getString(PREF_COMMANDER_SKIN, null) }
+        commanderSkin?.let { skin ->
+            val core = skin.style("core").displayed
+            val menu = skin.style("menu", "menuinactive").displayed
+            val button = skin.style("buttonbar", "button").displayed
+            val input = skin.style("core", "input").displayed
+            val selection = skin.style("core", "selected").displayed
+            outputPanelColor = core.background
+            outputTextColor = core.foreground
+            fileTextColor = core.foreground
+            directoryTextColor = skin.style("filehighlight", "directory").displayed.foreground
+            outputBorderColor = skin.style("core", "frame").displayed.foreground
+            headerPanelColor = menu.background
+            headerTextColor = menu.foreground
+            modulePanelColor = core.background
+            moduleTextColor = skin.style("core", "header").displayed.foreground
+            moduleButtonBgColor = button.background
+            moduleButtonTextColor = button.foreground
+            moduleButtonBorderColor = outputBorderColor
+            inputBgColor = input.background
+            inputTextColor = input.foreground
+            selectionBgColor = selection.background
+            selectionTextColor = selection.foreground
+            return
+        }
+        outputPanelColor = Color.rgb(55, 55, 55)
+        outputTextColor = Color.rgb(210, 210, 210)
+        fileTextColor = outputTextColor
+        directoryTextColor = Color.rgb(200, 196, 151)
+        outputBorderColor = Color.rgb(170, 170, 170)
+        headerPanelColor = Color.rgb(72, 72, 72)
+        headerTextColor = directoryTextColor
+        modulePanelColor = headerPanelColor
+        moduleTextColor = directoryTextColor
+        moduleButtonBgColor = headerPanelColor
+        moduleButtonTextColor = outputTextColor
+        moduleButtonBorderColor = outputBorderColor
+        inputTextColor = outputTextColor
+        selectionBgColor = Color.rgb(0, 96, 96)
+        selectionTextColor = Color.WHITE
     }
 
     private fun themeColorBindings(): List<ThemeColorBinding> = listOf(
@@ -5044,6 +5450,10 @@ open class MainActivity : Activity() {
         terminalBackgroundImage = prefs.getString(RetuiVisualContract.TERMINAL_BG_IMAGE, null)
             ?: prefs.getString("terminal_bg_image", terminalBackgroundImage)
         cyberdeckMode = prefsBool(prefs, RetuiVisualContract.CYBERDECK_MODE, cyberdeckMode, "cyberdeck_mode", "enable_cyberdeck_mode")
+        dashedBorders = prefsBool(prefs, RetuiVisualContract.DASHED_BORDERS, dashedBorders, "enable_dashed_border")
+        dashLengthDp = prefsInt(prefs, RetuiVisualContract.DASHED_BORDER_DASH_LENGTH, dashLengthDp)
+        dashGapDp = prefsInt(prefs, RetuiVisualContract.DASHED_BORDER_GAP_LENGTH, dashGapDp)
+        borderStrokeDp = prefs.getFloat(RetuiVisualContract.DASHED_BORDER_STROKE_WIDTH_DP, borderStrokeDp)
         crtFilter = prefsBool(prefs, RetuiVisualContract.CRT_FILTER, crtFilter, "crt_filter", "enable_crt_filter")
         appFontPath = prefs.getString(RetuiVisualContract.FONT_PATH, null) ?: prefs.getString("font_path", appFontPath)
         appFontName = prefs.getString(RetuiVisualContract.FONT_NAME, null) ?: prefs.getString("font_name", appFontName)
@@ -5101,6 +5511,10 @@ open class MainActivity : Activity() {
         topMarginDp = RetuiVisualContract.int(intent, topMarginDp, RetuiVisualContract.TOP_MARGIN)
         applyLauncherDisplayMargins(intent)
         cyberdeckMode = RetuiVisualContract.boolean(intent, cyberdeckMode, RetuiVisualContract.CYBERDECK_MODE)
+        dashedBorders = RetuiVisualContract.boolean(intent, dashedBorders, RetuiVisualContract.DASHED_BORDERS)
+        dashLengthDp = RetuiVisualContract.int(intent, dashLengthDp, RetuiVisualContract.DASHED_BORDER_DASH_LENGTH)
+        dashGapDp = RetuiVisualContract.int(intent, dashGapDp, RetuiVisualContract.DASHED_BORDER_GAP_LENGTH)
+        borderStrokeDp = RetuiVisualContract.float(intent, borderStrokeDp, RetuiVisualContract.DASHED_BORDER_STROKE_WIDTH_DP)
         crtFilter = RetuiVisualContract.boolean(intent, crtFilter, RetuiVisualContract.CRT_FILTER)
         RetuiVisualContract.string(intent, RetuiVisualContract.TERMINAL_BG_IMAGE)?.let { terminalBackgroundImage = it }
         var appliedFont = false
@@ -5159,6 +5573,10 @@ open class MainActivity : Activity() {
         editor.putInt(RetuiVisualContract.HEADER_CORNER_RADIUS, headerCornerRadiusDp)
         editor.putInt(RetuiVisualContract.TOP_MARGIN, topMarginDp)
         editor.putBoolean(RetuiVisualContract.CYBERDECK_MODE, cyberdeckMode)
+        editor.putBoolean(RetuiVisualContract.DASHED_BORDERS, dashedBorders)
+        editor.putInt(RetuiVisualContract.DASHED_BORDER_DASH_LENGTH, dashLengthDp)
+        editor.putInt(RetuiVisualContract.DASHED_BORDER_GAP_LENGTH, dashGapDp)
+        editor.putFloat(RetuiVisualContract.DASHED_BORDER_STROKE_WIDTH_DP, borderStrokeDp)
         editor.putBoolean(RetuiVisualContract.CRT_FILTER, crtFilter)
         editor.putString(RetuiVisualContract.TERMINAL_BG_IMAGE, terminalBackgroundImage)
         editor.putString(RetuiVisualContract.FONT_PATH, appFontPath)
@@ -5368,11 +5786,27 @@ open class MainActivity : Activity() {
                 appFontPath = null
                 appFontName = "system"
             }
-            FONT_MODE_DEFAULT -> {
+            null, FONT_MODE_DEFAULT -> {
                 appFontPath = null
                 appFontName = null
             }
         }
+    }
+
+    private fun workspaceFrameDrawable(): Drawable {
+        val framed = launcherFrameRuntime?.active == true
+        val fill = if (framed) Color.TRANSPARENT else launcherPanelColor
+        val fallback = if (cyberdeckMode && !framed) {
+            CyberPanelDrawable(fill, launcherPanelBorderColor, max(1f, dpFloat(1.5f)), true)
+        } else GradientDrawable().apply {
+            setColor(fill)
+            cornerRadius = dp(outputCornerRadiusDp).toFloat()
+            val stroke = if (framed) 0 else max(1, dpFloat(borderStrokeDp.takeIf { it.isFinite() }?.coerceIn(.5f, 8f) ?: 1.5f).roundToInt())
+            if (dashedBorders && dashLengthDp > 0 && dashGapDp > 0) {
+                setStroke(stroke, launcherPanelBorderColor, dp(dashLengthDp.coerceAtMost(128)).toFloat(), dp(dashGapDp.coerceAtMost(128)).toFloat())
+            } else setStroke(stroke, launcherPanelBorderColor)
+        }
+        return launcherFrameRuntime?.drawable(fallback) ?: fallback
     }
 
     private fun panelDrawable(role: PanelRole, interactive: Boolean = false): Drawable {
@@ -5607,8 +6041,10 @@ open class MainActivity : Activity() {
         private const val PREF_SEARCH_HISTORY = "search_history"
         private const val PREF_FONT_SCALE_OFFSET = "font_scale_offset"
         private const val PREF_FONT_MODE = "font_override_mode"
+        private const val FONT_MODE_LAUNCHER = "launcher"
         private const val PREF_CUSTOM_FONT_PATH = "custom_font_path"
         private const val PREF_THEME_COLORS_OVERRIDDEN = "theme.colorsOverridden"
+        private const val PREF_COMMANDER_SKIN = "theme.commanderSkin"
         private const val PREF_THEME_COLOR_PREFIX = "theme.override."
         private const val PREF_LAUNCHER_THEME_AVAILABLE = "theme.launcher.available"
         private const val FONT_MODE_CUSTOM = "custom"
@@ -5629,8 +6065,7 @@ open class MainActivity : Activity() {
         private const val PLAY_HTTPS_URL = "https://play.google.com/store/apps/details?id=com.dvil.retui.fm"
         private const val FEEDBACK_URL = "https://github.com/DvilSpawn/Re-TUI-FM/issues/new"
         private const val PRIVACY_URL = "https://github.com/DvilSpawn/Re-TUI-FM/blob/master/docs/privacy.html"
-        private const val RIGHT_GRID_MIN_CELL_WIDTH_DP = 72
-        private const val RIGHT_GRID_CELL_HEIGHT_DP = 82
+        private const val FILE_ROW_HEIGHT_DP = 32
         private const val CATEGORY_FIRST_PAGE_ROWS = 90
         private const val TRASH_DIR_NAME = ".retui-trash"
         private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "bmp", "avif")
