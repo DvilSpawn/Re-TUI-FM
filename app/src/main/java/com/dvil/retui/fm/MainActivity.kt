@@ -2679,12 +2679,14 @@ open class MainActivity : Activity() {
                 val dir = File(cacheDir, "archive-preview")
                 dir.deleteRecursively()
                 if (!dir.mkdirs()) throw java.io.IOException("Could not create preview folder")
-                ArchiveExtractor.extractTo(archive, dir, setOf(path)).single()
+                ArchiveExtractor.extractTo(archive, dir, setOf(path)).single().also { copy ->
+                    archiveEntries.firstOrNull { it.path == path }?.modified?.takeIf { it > 0 }?.let(copy::setLastModified)
+                }
             }
             runOnUiThread {
                 if (loadVersion != archiveLoadVersion || activeArchive != archive) return@runOnUiThread
                 result.fold(
-                    onSuccess = { previewFile(it, displayPath = "${archive.name}/$path") },
+                    onSuccess = { previewFile(it) },
                     onFailure = { showOutput("ARCHIVE", "Could not open $path:\n${it.message}") }
                 )
             }
@@ -2736,7 +2738,7 @@ open class MainActivity : Activity() {
         pendingArchiveExtraction = null
     }
 
-    private fun previewFile(file: File, contentUri: Uri? = null, displayPath: String = file.absolutePath) {
+    private fun previewFile(file: File, contentUri: Uri? = null) {
         if (!file.exists()) {
             showOutput("PREVIEW", "Not found: ${file.absolutePath}")
             return
@@ -2764,18 +2766,27 @@ open class MainActivity : Activity() {
                 val buffer = ByteArray(length)
                 val read = input.read(buffer)
                 val text = if (read > 0) String(buffer, 0, read, StandardCharsets.UTF_8) else ""
-                val suffix = if (file.length() > PREVIEW_MAX_BYTES) "\n\n... preview capped at $PREVIEW_MAX_BYTES bytes" else ""
-                showOutput("PREVIEW", displayPath + "\n\n" + text + suffix)
+                // Files unpacked from an archive live in the cache and cannot be edited in place.
+                val editable = !file.absolutePath.startsWith(cacheDir.absolutePath)
+                showTextPreview(file, text, file.length() > PREVIEW_MAX_BYTES, editable)
             }
         } catch (e: Exception) {
             showOutput("PREVIEW", "Could not read ${file.name}:\n${e.message}")
         }
     }
 
-    /** Floating terminal window over the current screen; tapping the picture hands off to Android's app picker. */
-    private fun showQuickPreview(file: File, contentUri: Uri?) {
+    /** Floating terminal window over the current screen, shared by image/media and text previews. */
+    private fun showPreviewWindow(
+        title: String,
+        stage: View,
+        meta: String,
+        hint: String,
+        buttons: List<Pair<String, () -> Unit>>,
+        fitStage: Boolean = false,
+        onHintClick: ((TextView) -> Unit)? = null
+    ): View? {
         dismissQuickPreview()
-        val root = rootView ?: return
+        val root = rootView ?: return null
         val scrim = FrameLayout(this)
         scrim.setBackgroundColor(0x99000000.toInt())
         scrim.isClickable = true
@@ -2790,21 +2801,72 @@ open class MainActivity : Activity() {
         val titleBar = LinearLayout(this)
         titleBar.orientation = LinearLayout.HORIZONTAL
         titleBar.setBackgroundColor(headerPanelColor)
-        val title = label(file.name, outputTextSizeSp, true)
-        title.gravity = Gravity.CENTER_VERTICAL
-        title.ellipsize = TextUtils.TruncateAt.MIDDLE
-        title.setPadding(dp(8), 0, dp(4), 0)
-        title.setTextColor(moduleTextColor)
-        commanderSkin?.style("dialog", "dtitle")?.displayed?.let { styleCommanderText(title, it) }
-        titleBar.addView(title, LinearLayout.LayoutParams(0, -1, 1f))
+        val titleView = label(title, outputTextSizeSp, true)
+        titleView.gravity = Gravity.CENTER_VERTICAL
+        titleView.ellipsize = TextUtils.TruncateAt.MIDDLE
+        titleView.setPadding(dp(8), 0, dp(4), 0)
+        titleView.setTextColor(moduleTextColor)
+        commanderSkin?.style("dialog", "dtitle")?.displayed?.let { styleCommanderText(titleView, it) }
+        titleBar.addView(titleView, LinearLayout.LayoutParams(0, -1, 1f))
         val close = label("X", outputTextSizeSp, true)
         close.gravity = Gravity.CENTER
-        close.setTextColor(title.currentTextColor)
+        close.setTextColor(titleView.currentTextColor)
         close.contentDescription = "Close preview"
         close.setOnClickListener { dismissQuickPreview() }
         titleBar.addView(close, LinearLayout.LayoutParams(dp(48), -1))
         window.addView(titleBar, LinearLayout.LayoutParams(-1, dp(40)))
 
+        val screen = resources.displayMetrics
+        val width = min(screen.widthPixels - dp(32), dp(460))
+        var stageHeight = (screen.heightPixels * 0.45f).toInt()
+        if (fitStage) {
+            // Short text shrinks the window instead of leaving a tall empty area.
+            stage.measure(View.MeasureSpec.makeMeasureSpec(width - dp(8), View.MeasureSpec.EXACTLY), View.MeasureSpec.UNSPECIFIED)
+            stageHeight = stageHeight.coerceAtMost(max(dp(96), stage.measuredHeight))
+        }
+        window.addView(stage, LinearLayout.LayoutParams(-1, stageHeight).apply { topMargin = dp(4) })
+
+        val metaView = label(meta, max(10, outputTextSizeSp - 1), false)
+        metaView.setPadding(dp(8), 0, dp(8), 0)
+        metaView.gravity = Gravity.CENTER_VERTICAL
+        metaView.setTextColor(outputTextColor)
+        window.addView(metaView, LinearLayout.LayoutParams(-1, dp(28)).apply { topMargin = dp(4) })
+        val hintView = label(hint, max(10, outputTextSizeSp - 2), false)
+        hintView.setPadding(dp(8), 0, dp(8), 0)
+        hintView.gravity = Gravity.CENTER_VERTICAL
+        hintView.setTextColor(withAlpha(outputTextColor, 150))
+        onHintClick?.let { action -> hintView.setOnClickListener { action(hintView) } }
+        window.addView(hintView, LinearLayout.LayoutParams(-1, dp(22)))
+
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        // Same light button style as the action bar; dialog buttons assume a light dialog panel behind them.
+        for ((text, action) in buttons) {
+            val view = label(text, outputTextSizeSp, true)
+            view.gravity = Gravity.CENTER
+            view.setTextColor(moduleButtonTextColor)
+            view.background = functionButtonBackground()
+            view.setOnClickListener { action() }
+            row.addView(view, LinearLayout.LayoutParams(0, dp(48), 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
+        }
+        window.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+
+        scrim.addView(window, FrameLayout.LayoutParams(width, -2, Gravity.CENTER))
+        root.addView(scrim, FrameLayout.LayoutParams(-1, -1))
+        quickPreview = scrim
+        return scrim
+    }
+
+    private fun previewDetails(file: File, vararg extra: String): String {
+        val details = mutableListOf(fileTypeTag(FileEntry(file, file.name, false)).trim('[', ']', ' '))
+        details += extra
+        details += humanSize(file.length())
+        details += java.text.SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()).format(java.util.Date(file.lastModified()))
+        return details.joinToString(" · ")
+    }
+
+    /** Image, video, audio and PDF preview; tapping the picture hands off to Android's app picker. */
+    private fun showQuickPreview(file: File, contentUri: Uri?) {
         val screen = resources.displayMetrics
         val stage = FrameLayout(this)
         stage.setBackgroundColor(0xff000000.toInt())
@@ -2818,47 +2880,18 @@ open class MainActivity : Activity() {
         image.scaleType = ImageView.ScaleType.FIT_CENTER
         image.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         stage.addView(image, FrameLayout.LayoutParams(-1, -1))
-        window.addView(stage, LinearLayout.LayoutParams(-1, (screen.heightPixels * 0.45f).toInt()).apply { topMargin = dp(4) })
 
-        val details = mutableListOf(fileTypeTag(FileEntry(file, file.name, false)).trim('[', ']', ' '))
+        var dimensions = emptyArray<String>()
         if (file.extension.lowercase(Locale.US) in IMAGE_EXTENSIONS) {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(file.absolutePath, bounds)
-            if (bounds.outWidth > 0) details += "${bounds.outWidth}x${bounds.outHeight}"
+            if (bounds.outWidth > 0) dimensions = arrayOf("${bounds.outWidth}x${bounds.outHeight}")
         }
-        details += humanSize(file.length())
-        details += java.text.SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()).format(java.util.Date(file.lastModified()))
-        val meta = label(details.joinToString(" · "), max(10, outputTextSizeSp - 1), false)
-        meta.setPadding(dp(8), 0, dp(8), 0)
-        meta.gravity = Gravity.CENTER_VERTICAL
-        meta.setTextColor(outputTextColor)
-        window.addView(meta, LinearLayout.LayoutParams(-1, dp(28)).apply { topMargin = dp(4) })
-        val hint = label("$ tap the preview to open with…", max(10, outputTextSizeSp - 2), false)
-        hint.setPadding(dp(8), 0, dp(8), 0)
-        hint.gravity = Gravity.CENTER_VERTICAL
-        hint.setTextColor(withAlpha(outputTextColor, 150))
-        window.addView(hint, LinearLayout.LayoutParams(-1, dp(22)))
-
-        val buttons = LinearLayout(this)
-        buttons.orientation = LinearLayout.HORIZONTAL
-        // Same light button style as the action bar; dialog buttons assume a light dialog panel behind them.
-        fun button(text: String, action: () -> Unit) {
-            val view = label(text, outputTextSizeSp, true)
-            view.gravity = Gravity.CENTER
-            view.setTextColor(moduleButtonTextColor)
-            view.background = functionButtonBackground()
-            view.setOnClickListener { action() }
-            buttons.addView(view, LinearLayout.LayoutParams(0, dp(48), 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
-        }
-        button("OPEN WITH") { dismissQuickPreview(); openFile(file, contentUri) }
-        button("SHARE") { dismissQuickPreview(); shareFile(file) }
-        button("CLOSE") { dismissQuickPreview() }
-        window.addView(buttons, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
-
-        val width = min(screen.widthPixels - dp(32), dp(460))
-        scrim.addView(window, FrameLayout.LayoutParams(width, -2, Gravity.CENTER))
-        root.addView(scrim, FrameLayout.LayoutParams(-1, -1))
-        quickPreview = scrim
+        val scrim = showPreviewWindow(file.name, stage, previewDetails(file, *dimensions), "$ tap the preview to open with…", listOf(
+            "OPEN WITH" to { dismissQuickPreview(); openFile(file, contentUri) },
+            "SHARE" to { dismissQuickPreview(); shareFile(file) },
+            "CLOSE" to { dismissQuickPreview() }
+        )) ?: return
 
         ThumbnailLoader.load(this, file, contentUri, max(screen.widthPixels, screen.heightPixels / 2)) { bitmap ->
             if (quickPreview !== scrim) return@load
@@ -2871,6 +2904,96 @@ open class MainActivity : Activity() {
                 loading.maxLines = 2
             }
         }
+    }
+
+    /** Text preview styled like `cat -n`: dim line numbers and light key/tag/string colouring. */
+    private fun showTextPreview(file: File, text: String, truncated: Boolean, editable: Boolean) {
+        val lines = text.removeSuffix("\n").split('\n')
+        val markdown = file.extension.equals("md", ignoreCase = true) || file.extension.equals("markdown", ignoreCase = true)
+        val body = android.text.SpannableStringBuilder()
+        val gutter = lines.size.toString().length
+        val numberColor = withAlpha(outputTextColor, 100)
+        lines.forEachIndexed { index, line ->
+            val numberStart = body.length
+            body.append((index + 1).toString().padStart(gutter)).append("  ")
+            body.setSpan(android.text.style.ForegroundColorSpan(numberColor), numberStart, body.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            val lineStart = body.length
+            body.append(line.trimEnd('\r'))
+            highlightLine(body, lineStart, line.trimEnd('\r'), markdown)
+            if (index < lines.lastIndex) body.append('\n')
+        }
+        if (truncated) body.append("\n\n… preview capped at ${humanSize(PREVIEW_MAX_BYTES.toLong())}")
+
+        val content = TextView(this)
+        content.text = body
+        content.setHorizontallyScrolling(false)
+        content.typeface = appTypeface ?: Typeface.MONOSPACE
+        content.setTextSize(scaledFontSp(max(10, outputTextSizeSp - 1), fontScaleOffsetSp))
+        content.setTextColor(outputTextColor)
+        content.setLineSpacing(dpFloat(3f), 1f)
+        content.setTextIsSelectable(true)
+        content.setPadding(dp(8), dp(8), dp(8), dp(8))
+        val stage = ScrollView(this)
+        stage.setBackgroundColor(0xff000000.toInt())
+        stage.isFillViewport = true
+        val holder = FrameLayout(this)
+        stage.addView(holder, FrameLayout.LayoutParams(-1, -2))
+        val sideways = HorizontalScrollView(this)
+        // ASCII art breaks when wrapped, so symbol-heavy text scrolls sideways instead.
+        var wrap = !looksLikeTextArt(text)
+        fun applyWrap() {
+            (content.parent as? android.view.ViewGroup)?.removeView(content)
+            holder.removeAllViews()
+            sideways.removeAllViews()
+            content.setHorizontallyScrolling(!wrap)
+            if (wrap) {
+                holder.addView(content, FrameLayout.LayoutParams(-1, -2))
+            } else {
+                sideways.addView(content, FrameLayout.LayoutParams(-2, -2))
+                holder.addView(sideways, FrameLayout.LayoutParams(-1, -2))
+            }
+        }
+        applyWrap()
+        fun hintText() = "$ cat -n ${file.name}  · wrap ${if (wrap) "on" else "off"}"
+
+        val lineCount = if (lines.size == 1) "1 line" else "${lines.size} lines"
+        val buttons = mutableListOf<Pair<String, () -> Unit>>()
+        if (editable) buttons += "EDIT" to { dismissQuickPreview(); editFile(file) }
+        buttons += "OPEN WITH" to { dismissQuickPreview(); openFile(file) }
+        buttons += "SHARE" to { dismissQuickPreview(); shareFile(file) }
+        buttons += "CLOSE" to { dismissQuickPreview() }
+        showPreviewWindow(file.name, stage, previewDetails(file, lineCount), hintText(), buttons, fitStage = true) { hint ->
+            wrap = !wrap
+            applyWrap()
+            hint.text = hintText()
+        }
+    }
+
+    private fun looksLikeTextArt(text: String): Boolean {
+        val visible = text.filterNot(Char::isWhitespace)
+        if (visible.length < 40) return false
+        return visible.count(Char::isLetter) < visible.length / 2
+    }
+
+    private fun highlightLine(body: android.text.SpannableStringBuilder, start: Int, line: String, markdown: Boolean) {
+        fun color(from: Int, to: Int, value: Int) {
+            if (to > from) body.setSpan(android.text.style.ForegroundColorSpan(value), start + from, start + to, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        val keyColor = moduleTextColor
+        val stringColor = directoryTextColor
+        val trimmed = line.trimStart()
+        if (markdown) {
+            if (trimmed.startsWith("#")) color(0, line.length, keyColor)
+            return
+        }
+        if (trimmed.startsWith("#") || trimmed.startsWith("//") || trimmed.startsWith(";") || trimmed.startsWith("<!--")) {
+            color(0, line.length, withAlpha(outputTextColor, 110))
+            return
+        }
+        PREVIEW_TAG.findAll(line).forEach { color(it.range.first, it.range.last + 1, keyColor) }
+        PREVIEW_STRING.findAll(line).forEach { color(it.range.first, it.range.last + 1, stringColor) }
+        PREVIEW_JSON_KEY.find(line)?.let { color(it.groups[1]!!.range.first, it.groups[1]!!.range.last + 1, keyColor) }
+            ?: PREVIEW_KEY.find(line)?.let { color(it.groups[1]!!.range.first, it.groups[1]!!.range.last + 1, keyColor) }
     }
 
     private fun dismissQuickPreview() {
@@ -5587,7 +5710,8 @@ open class MainActivity : Activity() {
     private fun isLikelyText(file: File): Boolean {
         val name = file.name.lowercase(Locale.US)
         val ext = name.substringAfterLast('.', "")
-        return ext in setOf("txt", "md", "json", "csv", "xml", "html", "css", "js", "kt", "java", "log", "yaml", "yml", "ignore", "gitignore") ||
+        return ext in setOf("txt", "md", "json", "csv", "xml", "html", "css", "js", "kt", "java", "log", "yaml", "yml", "ignore", "gitignore",
+            "ini", "properties", "conf", "cfg", "toml", "env", "sh", "py", "ts", "gradle", "kts", "c", "h", "cpp", "rs", "go", "lua", "sql", "srt", "tsv") ||
             file.name.startsWith(".") && file.length() <= PREVIEW_MAX_BYTES
     }
 
@@ -6561,6 +6685,10 @@ open class MainActivity : Activity() {
         private val VIDEO_EXTENSIONS = setOf("mp4", "mkv", "mov", "avi", "webm", "3gp", "m4v")
         private val AUDIO_EXTENSIONS = setOf("mp3", "wav", "flac", "m4a", "ogg", "opus", "aac")
         private val DOCUMENT_EXTENSIONS = setOf("txt", "md", "markdown", "pdf", "csv", "html", "xml", "json", "rtf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt")
+        private val PREVIEW_TAG = Regex("</?[A-Za-z_][\\w:.-]*|/?>")
+        private val PREVIEW_STRING = Regex("\"(?:[^\"\\\\]|\\\\.)*\"")
+        private val PREVIEW_JSON_KEY = Regex("^\\s*(\"[^\"]+\")\\s*:")
+        private val PREVIEW_KEY = Regex("^\\s*([A-Za-z_][\\w.\\-]*)\\s*[=:]")
         private const val ARCHIVE_PREVIEW_MAX_BYTES = 64L * 1024 * 1024
         private val QUICK_PREVIEW_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "avif") +
             setOf("mp4", "mkv", "mov", "avi", "webm", "3gp", "m4v", "mp3", "wav", "flac", "m4a", "ogg", "opus", "aac", "pdf")
