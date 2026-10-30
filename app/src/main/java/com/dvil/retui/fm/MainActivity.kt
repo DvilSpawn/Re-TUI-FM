@@ -1037,9 +1037,11 @@ open class MainActivity : Activity() {
 
     private fun buildActionBar(bar: LinearLayout) {
         actionBarScreen = currentScreen
-        bar.layoutParams?.let { it.height = dp(48); bar.layoutParams = it }
+        bar.layoutParams?.let { it.height = dp(40); bar.layoutParams = it }
+        bar.setBackgroundColor(outputPanelColor or 0xff000000.toInt())
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
         val lastFolder = NavigationStateStore.last(themePrefs()) ?: homeDirectory()
         val actions = if (currentScreen == Screen.HOME) listOf(
             Triple("Browse", "Browse ${lastFolder.name.ifBlank { "storage" }}") { navigateMain(lastFolder) },
@@ -1065,12 +1067,16 @@ open class MainActivity : Activity() {
             button.setTextColor(moduleButtonTextColor)
             button.setBackgroundColor(moduleButtonBgColor)
             commanderSkin?.style("buttonbar", "button")?.displayed?.let { styleCommanderText(button, it, background = true) }
+            // Compact chips sized to their label; the full bar height stays tappable.
+            val fill = (button.background as? ColorDrawable)?.color ?: moduleButtonBgColor
+            button.background = android.graphics.drawable.InsetDrawable(ColorDrawable(fill), 0, dp(6), 0, dp(6))
+            button.setPadding(dp(12), 0, dp(12), 0)
             button.contentDescription = description
             button.setOnClickListener { action() }
-            val params = LinearLayout.LayoutParams(0, -1, 1f)
-            params.setMargins(dp(1), dp(1), dp(1), dp(1))
-            row.addView(button, params)
+            if (row.childCount > 0) row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+            row.addView(button, LinearLayout.LayoutParams(-2, -1))
         }
+        row.setPadding(dp(6), 0, dp(6), 0)
         bar.addView(row, LinearLayout.LayoutParams(-1, -1))
     }
 
