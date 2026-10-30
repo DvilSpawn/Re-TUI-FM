@@ -1749,7 +1749,8 @@ open class MainActivity : Activity() {
         folderCountCache.clear()
         val dir = pane.directory
         pane.rows.clear()
-        pane.rows.add(FileEntry(dir.parentFile, "/..", true, true))
+        // A storage root's parent (e.g. /storage/emulated) is unreadable on Android; Home is the way up.
+        if (!isStorageRoot(dir)) pane.rows.add(FileEntry(dir.parentFile, "/..", true, true))
         val children = dir.listFiles()
         val files = children?.filter { showHidden || !it.name.startsWith(".") }.orEmpty()
         val sorted = if (pane === rightPane) sortedFiles(files) else files.sortedWith(
@@ -2576,6 +2577,8 @@ open class MainActivity : Activity() {
             activeProvider?.parent(activeProviderUri ?: return)?.let { showProviderDirectory(it, activeProvider?.rootUri) }
         } else if (activeArchive != null) {
             if (archiveDirectory.isNotEmpty()) showArchiveDirectory(ArchiveExtractor.parent(archiveDirectory)) else closeArchive()
+        } else if (isStorageRoot(rightPane.directory)) {
+            showHome()
         } else {
             rightPane.directory.parentFile?.let { showDirectoryContents(it) }
         }
@@ -4331,7 +4334,9 @@ open class MainActivity : Activity() {
                     val rows = if (result.files.isEmpty()) arrayListOf(FileEntry(null, "No matches for $label", false))
                     else ArrayList(result.files.map { file -> FileEntry(file, file.name, file.isDirectory) })
                     if (result.truncated) rows.add(FileEntry(null, "Showing first $MAX_ROWS matches. Refine the search.", false))
-                    if (result.inaccessibleRoots + scope.skippedRoots > 0) rows.add(FileEntry(null, "Some storage or folders were unreadable, so results may be incomplete.", false))
+                    // Android always blocks folders like Android/data, so only mention it when nothing was found.
+                    if (scope.skippedRoots > 0) rows.add(FileEntry(null, "${scope.skippedRoots} storage location(s) could not be searched.", false))
+                    if (result.files.isEmpty() && result.inaccessibleRoots > 0) rows.add(FileEntry(null, "Folders Android protects, like Android/data, were not searched.", false))
                     if (result.cancelled) rows.add(FileEntry(null, "Search cancelled after ${result.scanned} items.", false))
                     showFindRows(
                         label,
@@ -5765,6 +5770,9 @@ open class MainActivity : Activity() {
         val external = Environment.getExternalStorageDirectory()
         return if (external.exists()) external else File("/")
     }
+
+    private fun isStorageRoot(dir: File): Boolean =
+        dir.absolutePath == homeDirectory().absolutePath || storageRoots().any { it.absolutePath == dir.absolutePath }
 
     private fun storageRoots(): List<File> {
         val home = homeDirectory()
