@@ -1076,6 +1076,10 @@ open class MainActivity : Activity() {
             if (row.childCount > 0) row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
             row.addView(button, LinearLayout.LayoutParams(-2, -1))
         }
+        // Every chip takes the widest label's width so the bar reads as one even set.
+        val chips = (0 until row.childCount).map(row::getChildAt).filterIsInstance<TextView>()
+        val chipWidth = chips.maxOfOrNull { it.paint.measureText(it.text.toString()).toInt() + it.paddingLeft + it.paddingRight } ?: 0
+        chips.forEach { it.layoutParams = LinearLayout.LayoutParams(chipWidth, -1) }
         row.setPadding(dp(6), 0, dp(6), 0)
         bar.addView(row, LinearLayout.LayoutParams(-1, -1))
     }
