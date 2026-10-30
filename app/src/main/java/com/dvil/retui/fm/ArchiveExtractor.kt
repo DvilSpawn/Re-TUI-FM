@@ -24,7 +24,7 @@ internal object ArchiveExtractor {
         ".zip", ".jar", ".rar", ".7z", ".tar"
     )
 
-    data class Entry(val path: String, val isDirectory: Boolean, val size: Long = 0)
+    data class Entry(val path: String, val isDirectory: Boolean, val size: Long = 0, val modified: Long = 0)
 
     fun supports(file: File): Boolean = file.isFile && suffix(file) != null
 
@@ -47,7 +47,7 @@ internal object ArchiveExtractor {
             val name = relative.substringBefore('/')
             val path = prefix + name
             val direct = relative == name
-            val child = Entry(path, !direct || entry.isDirectory, if (direct) entry.size else 0)
+            val child = Entry(path, !direct || entry.isDirectory, if (direct) entry.size else 0, if (direct) entry.modified else 0)
             val existing = children[path]
             if (existing == null || child.isDirectory && !existing.isDirectory) children[path] = child
         }
@@ -176,14 +176,15 @@ internal object ArchiveExtractor {
                 val entries = zip.entries()
                 while (entries.hasMoreElements()) {
                     val item = entries.nextElement()
-                    val entry = entry(item.name, item.isDirectory, item.size)
+                    val entry = entry(item.name, item.isDirectory, item.size, item.time)
                     action(entry) { output -> zip.getInputStream(item).use { it.copyTo(output) } }
                 }
             }
             ".7z" -> SevenZFile.builder().setFile(archive).get().use { sevenZip ->
                 while (true) {
                     val item = sevenZip.nextEntry ?: break
-                    val entry = entry(item.name ?: throw IOException("7z archive contains an unnamed entry"), item.isDirectory, item.size)
+                    val entry = entry(item.name ?: throw IOException("7z archive contains an unnamed entry"), item.isDirectory, item.size,
+                        if (item.hasLastModifiedDate) item.lastModifiedDate.time else 0)
                     action(entry) { output ->
                         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                         while (true) {
@@ -198,7 +199,7 @@ internal object ArchiveExtractor {
                 if (rar.isEncrypted) throw IOException("Password-protected RAR archives are not supported")
                 for (item in rar) {
                     if (item.isEncrypted) throw IOException("Password-protected RAR archives are not supported")
-                    val entry = entry(item.fileName, item.isDirectory, item.unpSize)
+                    val entry = entry(item.fileName, item.isDirectory, item.unpSize, item.mTime?.time ?: 0)
                     action(entry) { output -> rar.extractFile(item, output) }
                 }
             }
@@ -208,7 +209,7 @@ internal object ArchiveExtractor {
                         val item = tar.nextTarEntry ?: break
                         val unsupported = item.isSymbolicLink || item.isLink || !item.isDirectory && !item.isFile
                         if (!tar.canReadEntryData(item)) throw IOException("Unsupported TAR entry: ${item.name}")
-                        val entry = entry(item.name, item.isDirectory, item.size)
+                        val entry = entry(item.name, item.isDirectory, item.size, item.modTime?.time ?: 0)
                         action(entry) { output ->
                             if (unsupported) throw IOException("Archive links and special TAR entries are not supported")
                             tar.copyTo(output)
@@ -219,11 +220,11 @@ internal object ArchiveExtractor {
         }
     }
 
-    private fun entry(rawPath: String, directory: Boolean, size: Long): Entry {
+    private fun entry(rawPath: String, directory: Boolean, size: Long, modified: Long = 0): Entry {
         val absolute = rawPath.startsWith('/') || rawPath.length >= 2 && rawPath[1] == ':'
         val parts = rawPath.replace('\\', '/').split('/').filter { it.isNotEmpty() && it != "." }
         if (absolute || parts.isEmpty() || parts.any { it == ".." }) throw IOException("Unsafe archive path: $rawPath")
-        return Entry(parts.joinToString("/"), directory, size.coerceAtLeast(0))
+        return Entry(parts.joinToString("/"), directory, size.coerceAtLeast(0), modified.coerceAtLeast(0))
     }
 
     private fun tarInput(archive: File): TarArchiveInputStream {

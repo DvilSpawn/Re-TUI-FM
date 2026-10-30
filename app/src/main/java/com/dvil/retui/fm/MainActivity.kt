@@ -17,6 +17,7 @@ import android.content.SharedPreferences
 import android.content.res.Configuration
 import android.content.pm.PackageManager
 import android.graphics.Canvas
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.ColorFilter
 import android.graphics.Paint
@@ -99,7 +100,8 @@ open class MainActivity : Activity() {
         val archivePath: String? = null,
         val size: Long = 0,
         val providerItem: StorageItem? = null,
-        val providerRootUri: Uri? = null
+        val providerRootUri: Uri? = null,
+        val modified: Long = 0
     )
 
     private data class PendingArchiveExtraction(val archive: File, val selected: Set<String>)
@@ -158,6 +160,13 @@ open class MainActivity : Activity() {
     private var pendingPaneRelayout = false
     private var leftTitleView: TextView? = null
     private var rightTitleView: TextView? = null
+    private var breadcrumbRow: LinearLayout? = null
+    private var menuBarView: View? = null
+    private val folderCountCache = HashMap<String, Int>()
+    /** Touch users never see the keyboard cursor in compact mode; it appears once a key is pressed. */
+    private var cursorFromKeys = false
+    private var actionBarScreen: Screen? = null
+    private var quickPreview: View? = null
     private var functionBar: LinearLayout? = null
     private var commandLineView: TextView? = null
     private var showHidden = false
@@ -427,6 +436,7 @@ open class MainActivity : Activity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        applyLayoutMode()
         if (currentScreen == Screen.TREE) {
             if (paneDialog == null) reflowTreePanes() else pendingPaneRelayout = true
         }
@@ -468,6 +478,7 @@ open class MainActivity : Activity() {
             cancelOperation(it)
             return
         }
+        if (quickPreview != null) return dismissQuickPreview()
         paneDialog?.let { it.dismiss(); restoreAppearanceForm(); return }
         if (selectedPaths.isNotEmpty() || shareSelectionMode) {
             closeShareSelection()
@@ -569,6 +580,7 @@ open class MainActivity : Activity() {
     private fun buildUi(): View {
         val root = FrameLayout(this)
         rootView = root
+        quickPreview = null
         root.isFocusableInTouchMode = true
         root.clipChildren = false
         root.clipToPadding = false
@@ -621,6 +633,7 @@ open class MainActivity : Activity() {
         } else root.addView(frame, mainParams)
         root.requestApplyInsets()
 
+        menuBarView = menu
         main.addView(menu, LinearLayout.LayoutParams(-1, dp(32)))
         val workspace = FrameLayout(this)
         contentHost = FrameLayout(this)
@@ -637,6 +650,7 @@ open class MainActivity : Activity() {
         }
         val close = label("X", outputTextSizeSp, true).apply {
             gravity = Gravity.CENTER
+            setTextColor(moduleButtonTextColor)
             contentDescription = "Clear selection or cancel pending action"
             setOnClickListener {
                 when {
@@ -648,7 +662,7 @@ open class MainActivity : Activity() {
                 }
             }
         }
-        selection.addView(close, LinearLayout.LayoutParams(dp(32), -1))
+        selection.addView(close, LinearLayout.LayoutParams(dp(48), -1))
         selectionSurface = selection
         selection.visibility = selectionBar?.visibility ?: View.GONE
         workspace.addView(selection, FrameLayout.LayoutParams(-1, dp(32), Gravity.TOP))
@@ -657,7 +671,23 @@ open class MainActivity : Activity() {
         main.addView(workspace, workspaceParams)
         main.addView(buildCommandLine(), LinearLayout.LayoutParams(-1, dp(32)))
         main.addView(buildFunctionBar(), LinearLayout.LayoutParams(-1, dp(64)))
+        applyLayoutMode()
         return root
+    }
+
+    private fun treePanesMissing(): Boolean = rightListView == null || !compactLayout() && leftRowsView == null
+
+    /** Phones get one full-width list with large targets; wide screens keep the two MC panels. */
+    private fun compactLayout(): Boolean = resources.configuration.screenWidthDp < 600
+
+    private fun applyLayoutMode() {
+        val compact = compactLayout()
+        menuBarView?.visibility = if (compact) View.GONE else View.VISIBLE
+        selectionSurface?.let { surface ->
+            // In compact mode selection actions sit above the command line, replacing the action bar.
+            surface.layoutParams = FrameLayout.LayoutParams(-1, dp(if (compact) 48 else 32), if (compact) Gravity.BOTTOM else Gravity.TOP)
+        }
+        updateFunctionBar()
     }
 
     private fun buildSelectionBar(): LinearLayout {
@@ -680,6 +710,10 @@ open class MainActivity : Activity() {
         val hasWork = activeSearchCancellation != null || shareSelectionMode || activeArchive != null || pendingArchiveExtraction != null || selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty() || pendingMovePaths.isNotEmpty()
         row.visibility = if (hasWork && currentScreen == Screen.TREE) View.VISIBLE else View.GONE
         selectionSurface?.visibility = row.visibility
+        if (compactLayout()) {
+            functionBar?.visibility = if (row.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            rightListView?.setPadding(0, 0, 0, if (row.visibility == View.VISIBLE) dp(48) else 0)
+        }
         if (!hasWork) {
             selectionScrollView?.scrollTo(0, 0)
             return
@@ -687,27 +721,26 @@ open class MainActivity : Activity() {
         activeSearchCancellation?.let {
             val count = label("Searching… $searchScanned scanned", max(10, outputTextSizeSp - 2), true)
             count.gravity = Gravity.CENTER_VERTICAL
-            count.setTextColor(moduleTextColor)
-            row.addView(count, LinearLayout.LayoutParams(dp(120), -1))
+            count.setTextColor(moduleButtonTextColor)
+            row.addView(count, LinearLayout.LayoutParams(dp(selectionCountWidthDp()), -1))
             addSelectionAction(row, "CANCEL") { it.set(true) }
             return
         }
         activeArchive?.let { archive ->
-            val count = label(if (selectedPaths.isEmpty()) archive.name else "${selectedPaths.size} selected", max(10, outputTextSizeSp - 2), true)
+            // The path bar already names the archive; the bar only needs what will be extracted.
+            val count = label(if (selectedPaths.isEmpty()) "Whole archive" else "${selectedPaths.size} selected", max(10, outputTextSizeSp - 2), true)
             count.gravity = Gravity.CENTER_VERTICAL
-            count.setTextColor(moduleTextColor)
-            row.addView(count, LinearLayout.LayoutParams(dp(120), -1))
-            addSelectionAction(row, if (selectedPaths.isEmpty()) "EXTRACT ALL" else "EXTRACT") { extractArchiveNamed() }
-            addSelectionAction(row, "EXTRACT HERE") { extractArchiveHere() }
-            addSelectionAction(row, "EXTRACT TO") { prepareArchiveExtractTo() }
+            count.setTextColor(moduleButtonTextColor)
+            row.addView(count, LinearLayout.LayoutParams(dp(selectionCountWidthDp() + 16), -1))
+            addSelectionAction(row, "EXTRACT") { showExtractChoices(archive) }
             return
         }
         pendingArchiveExtraction?.let { request ->
             val text = if (request.selected.isEmpty()) request.archive.name else "${request.selected.size} ready to extract"
             val count = label(text, max(10, outputTextSizeSp - 2), true)
             count.gravity = Gravity.CENTER_VERTICAL
-            count.setTextColor(moduleTextColor)
-            row.addView(count, LinearLayout.LayoutParams(dp(120), -1))
+            count.setTextColor(moduleButtonTextColor)
+            row.addView(count, LinearLayout.LayoutParams(dp(selectionCountWidthDp()), -1))
             addSelectionAction(row, "EXTRACT HERE") { confirmArchiveExtractHere() }
             return
         }
@@ -719,8 +752,8 @@ open class MainActivity : Activity() {
         }
         val count = label(countText, max(10, outputTextSizeSp - 2), true)
         count.gravity = Gravity.CENTER_VERTICAL
-        count.setTextColor(moduleTextColor)
-        row.addView(count, LinearLayout.LayoutParams(dp(120), -1))
+        count.setTextColor(moduleButtonTextColor)
+        row.addView(count, LinearLayout.LayoutParams(dp(selectionCountWidthDp()), -1))
         if (shareSelectionMode) {
             if (selectedPaths.isNotEmpty()) addSelectionAction(row, "SHARE") { shareSelectedFiles() }
             return
@@ -744,6 +777,8 @@ open class MainActivity : Activity() {
         }
     }
 
+    private fun selectionCountWidthDp(): Int = if (compactLayout()) 84 else 120
+
     private fun addSelectionAction(parent: LinearLayout, text: String, action: () -> Unit) {
         val button = label(text, max(9, outputTextSizeSp - 3), true)
         button.gravity = Gravity.CENTER
@@ -754,7 +789,7 @@ open class MainActivity : Activity() {
         params.leftMargin = dp(4)
         params.width = dp(
             when (text) {
-                "EXTRACT ALL" -> 72
+                "EXTRACT ALL", "EXTRACT" -> 72
                 "EXTRACT HERE" -> 76
                 "EXTRACT TO" -> 68
                 "MOVE HERE" -> 74
@@ -770,6 +805,21 @@ open class MainActivity : Activity() {
         tappedLeftEntry = null
         val panes = LinearLayout(this)
         panes.orientation = LinearLayout.HORIZONTAL
+        if (compactLayout()) {
+            // The left folder list duplicates the right one on narrow screens; leave it unbuilt.
+            leftTitleView = null
+            leftRowsView = null
+            leftScrollView = null
+            leftFooterView = null
+            leftDiskView = null
+            activePanel = Panel.RIGHT
+            rightWorkspace = FrameLayout(this).also { host ->
+                host.addView(buildPane(Panel.RIGHT), FrameLayout.LayoutParams(-1, -1))
+                panes.addView(host, LinearLayout.LayoutParams(-1, -1))
+            }
+            return panes
+        }
+        breadcrumbRow = null
         val leftParams = LinearLayout.LayoutParams(0, -1, 0.38f)
         val rightParams = LinearLayout.LayoutParams(0, -1, 0.62f)
         rightParams.leftMargin = dp(4)
@@ -953,6 +1003,12 @@ open class MainActivity : Activity() {
     private fun updateFunctionBar() {
         val bar = functionBar ?: return
         bar.removeAllViews()
+        if (compactLayout()) {
+            buildActionBar(bar)
+            return
+        }
+        bar.visibility = View.VISIBLE
+        bar.layoutParams?.let { it.height = dp(64); bar.layoutParams = it }
         val names = listOf("Help", "Menu", "View", "Edit",
             if (pendingCopyPaths.isNotEmpty()) "Paste" else "Copy",
             if (pendingMovePaths.isNotEmpty()) "Move here" else "Move",
@@ -977,6 +1033,57 @@ open class MainActivity : Activity() {
             }
             bar.addView(row, LinearLayout.LayoutParams(-1, dp(32)))
         }
+    }
+
+    private fun buildActionBar(bar: LinearLayout) {
+        actionBarScreen = currentScreen
+        bar.layoutParams?.let { it.height = dp(48); bar.layoutParams = it }
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        val lastFolder = NavigationStateStore.last(themePrefs()) ?: homeDirectory()
+        val actions = if (currentScreen == Screen.HOME) listOf(
+            Triple("Browse", "Browse ${lastFolder.name.ifBlank { "storage" }}") { navigateMain(lastFolder) },
+            Triple("Places", "Places and bookmarks") { showPlacesMenu() },
+            Triple("Search", "Search all files") { promptSearch(null, "Search all storage") },
+            Triple("More", "More menus") { showMoreMenu() }
+        ) else listOf(
+            Triple("Places", "Places and bookmarks") { showPlacesMenu() },
+            Triple("Search", "Search this folder") { promptSearch(contentPane().directory, "Search current folder") },
+            Triple("Sort", "Sort order") { showSortMenu() },
+            Triple("New", "New folder or file") {
+                showActionMenu("New", listOf(
+                    "Folder" to { promptMkdir() },
+                    "Text file" to { promptNewTextFile() }
+                ))
+            },
+            Triple("More", "More menus") { showMoreMenu() }
+        )
+        for ((text, description, action) in actions) {
+            val button = label(text, outputTextSizeSp, true)
+            button.id = View.generateViewId()
+            button.gravity = Gravity.CENTER
+            button.setTextColor(moduleButtonTextColor)
+            button.setBackgroundColor(moduleButtonBgColor)
+            commanderSkin?.style("buttonbar", "button")?.displayed?.let { styleCommanderText(button, it, background = true) }
+            button.contentDescription = description
+            button.setOnClickListener { action() }
+            val params = LinearLayout.LayoutParams(0, -1, 1f)
+            params.setMargins(dp(1), dp(1), dp(1), dp(1))
+            row.addView(button, params)
+        }
+        bar.addView(row, LinearLayout.LayoutParams(-1, -1))
+    }
+
+    private fun showMoreMenu() {
+        showActionMenu("Menus", listOf(
+            "File" to { showFileMenu() },
+            "Selection" to { showEditMenu() },
+            "View" to { showViewMenu() },
+            "Command" to { showCommandMenu() },
+            "Options" to { showOptionsMenu() },
+            "Help" to { showHelpPopup() },
+            "Close RE:TUI FM" to { finish() }
+        ))
     }
 
     private fun runFunctionAction(number: Int) {
@@ -1031,8 +1138,16 @@ open class MainActivity : Activity() {
         title.setPadding(dp(4), 0, dp(4), 0)
         title.contentDescription = if (panel == Panel.LEFT) "Folder browser menu" else "Path and breadcrumbs"
         title.setOnClickListener { if (panel == Panel.LEFT) showFolderBrowserMenu() else showBreadcrumbMenu() }
-        pane.addView(title, LinearLayout.LayoutParams(-1, dp(32)))
-        if (panel == Panel.LEFT) leftTitleView = title else rightTitleView = title
+        val compact = panel == Panel.RIGHT && compactLayout()
+        if (compact) {
+            pane.addView(buildBreadcrumbBar(), LinearLayout.LayoutParams(-1, dp(48)))
+            rightTitleView = null
+            rightNameSortView = null
+            rightModifiedSortView = null
+        } else {
+            pane.addView(title, LinearLayout.LayoutParams(-1, dp(32)))
+            if (panel == Panel.LEFT) leftTitleView = title else rightTitleView = title
+        }
 
         if (panel == Panel.LEFT) {
             val header = LinearLayout(this)
@@ -1049,7 +1164,7 @@ open class MainActivity : Activity() {
             leftRowsView = rows
             leftScrollView = scroll
         } else {
-            pane.addView(buildRightSortBar(), LinearLayout.LayoutParams(-1, dp(20)))
+            if (!compact) pane.addView(buildRightSortBar(), LinearLayout.LayoutParams(-1, dp(20)))
             val grid = ListView(this)
             grid.id = R.id.fm_file_list
             grid.divider = null
@@ -1101,7 +1216,8 @@ open class MainActivity : Activity() {
         footer.setPadding(dp(4), 0, dp(4), 0)
         footer.ellipsize = TextUtils.TruncateAt.END
         footer.background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(max(1, dp(1)), outputBorderColor) }
-        pane.addView(footer, LinearLayout.LayoutParams(-1, dp(20)))
+        // Compact rows already show full names, so the selected-name footer is redundant there.
+        if (!compact) pane.addView(footer, LinearLayout.LayoutParams(-1, dp(20)))
         val disk = label("", max(10, outputTextSizeSp - 2), true)
         disk.gravity = Gravity.END or Gravity.CENTER_VERTICAL
         pane.addView(disk, LinearLayout.LayoutParams(-1, dp(20)))
@@ -1114,6 +1230,91 @@ open class MainActivity : Activity() {
             rightDiskView = disk
         }
         return pane
+    }
+
+    private fun buildBreadcrumbBar(): View {
+        val bar = LinearLayout(this)
+        bar.orientation = LinearLayout.HORIZONTAL
+        bar.setBackgroundColor(headerPanelColor)
+        commanderSkin?.style("core", "header")?.displayed?.let { style -> bar.setBackgroundColor(style.background) }
+        val up = label("<", outputTextSizeSp + 2, true)
+        up.gravity = Gravity.CENTER
+        up.setTextColor(outputTextColor)
+        up.contentDescription = "Up one folder"
+        up.setOnClickListener { goParent() }
+        bar.addView(up, LinearLayout.LayoutParams(dp(48), -1))
+        val scroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val crumbs = LinearLayout(this)
+        crumbs.orientation = LinearLayout.HORIZONTAL
+        crumbs.gravity = Gravity.CENTER_VERTICAL
+        scroll.addView(crumbs, FrameLayout.LayoutParams(-2, -1))
+        bar.addView(scroll, LinearLayout.LayoutParams(0, -1, 1f))
+        breadcrumbRow = crumbs
+        return bar
+    }
+
+    private fun renderBreadcrumbs() {
+        val crumbs = breadcrumbRow ?: return
+        crumbs.removeAllViews()
+        fun crumb(text: String, current: Boolean, action: (() -> Unit)?) {
+            val view = label(text, outputTextSizeSp, current)
+            view.gravity = Gravity.CENTER_VERTICAL
+            view.setPadding(dp(6), 0, dp(6), 0)
+            view.setTextColor(if (current) selectionTextColor else outputTextColor)
+            action?.let { view.setOnClickListener { it() } }
+            crumbs.addView(view, LinearLayout.LayoutParams(-2, -1))
+        }
+        fun separator() = crumbs.addView(label("/", outputTextSizeSp, false).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setTextColor(withAlpha(outputTextColor, 170))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(-2, -1))
+        val virtual = rightVirtualTitle
+        crumb("Home", false) { showHome() }
+        separator()
+        val archive = activeArchive
+        if (currentScreen == Screen.TREE && archive != null) {
+            folderCrumbs(archive.parentFile ?: homeDirectory(), ::crumb, ::separator, currentIsLink = true)
+            separator()
+            val inside = archiveDirectory.split('/').filter { it.isNotEmpty() }
+            crumb(archive.name, inside.isEmpty(), if (inside.isEmpty()) null else ({ showArchiveDirectory("") }))
+            inside.forEachIndexed { index, name ->
+                separator()
+                val path = inside.take(index + 1).joinToString("/")
+                val current = index == inside.lastIndex
+                crumb(name, current, if (current) null else ({ showArchiveDirectory(path) }))
+            }
+            (crumbs.parent as? HorizontalScrollView)?.let { scroll -> scroll.post { scroll.fullScroll(View.FOCUS_RIGHT) } }
+            return
+        }
+        if (currentScreen != Screen.TREE || virtual != null || activeProvider != null) {
+            crumb(virtual ?: activeArchive?.name ?: activeProvider?.displayName ?: "Home", true, null)
+            return
+        }
+        folderCrumbs(rightPane.directory, ::crumb, ::separator, currentIsLink = false)
+        (crumbs.parent as? HorizontalScrollView)?.let { scroll -> scroll.post { scroll.fullScroll(View.FOCUS_RIGHT) } }
+    }
+
+    private fun folderCrumbs(
+        dir: File,
+        crumb: (String, Boolean, (() -> Unit)?) -> Unit,
+        separator: () -> Unit,
+        currentIsLink: Boolean
+    ) {
+        val home = homeDirectory()
+        val chain = ArrayList<File>()
+        var cursor: File? = dir
+        while (cursor != null) {
+            chain += cursor
+            if (cursor == home) break
+            cursor = cursor.parentFile
+        }
+        chain.asReversed().forEachIndexed { index, folder ->
+            if (index > 0) separator()
+            val name = if (folder == home) "~" else folder.name.ifBlank { folder.absolutePath }
+            val current = folder == dir && !currentIsLink
+            crumb(name, current, if (current) null else ({ showDirectoryContents(folder) }))
+        }
     }
 
     private fun buildRightSortBar(): View {
@@ -1238,6 +1439,11 @@ open class MainActivity : Activity() {
         if (tree) navigationHistory.addLast(captureNavigation())
         suppressNavigationHistory = true
         try {
+            if (!tree && compactLayout()) {
+                // Like stock file managers, a plain launch starts on categories, recents and storage.
+                showHome(recordHistory = false)
+                return
+            }
             showTree(start, recordHistory = false)
             handleIncomingRequest(intent)
         } finally {
@@ -1291,9 +1497,33 @@ open class MainActivity : Activity() {
         content.orientation = LinearLayout.VERTICAL
         content.setPadding(0, 0, 0, dp(8))
         scroll.addView(content, FrameLayout.LayoutParams(-1, -2))
+        content.addView(buildHomeSearchRow(), LinearLayout.LayoutParams(-1, dp(48)).apply { setMargins(dp(4), dp(4), dp(4), dp(2)) })
         content.addView(buildCategorySection(), sectionParams())
+        buildRecentSection()?.let { content.addView(it, sectionParams()) }
         content.addView(buildStorageSection(), sectionParams())
         return scroll
+    }
+
+    private fun buildHomeSearchRow(): View {
+        val search = label("$ find  Search all files…", outputTextSizeSp, false)
+        search.gravity = Gravity.CENTER_VERTICAL
+        search.setPadding(dp(12), 0, dp(12), 0)
+        search.setTextColor(withAlpha(inputTextColor, 200))
+        search.background = panelDrawable(PanelRole.OUTPUT)
+        search.contentDescription = "Search all files"
+        search.setOnClickListener { promptSearch(null, "Search all storage") }
+        return search
+    }
+
+    private fun buildRecentSection(): View? {
+        val recent = NavigationStateStore.recent(themePrefs()).take(4)
+        if (recent.isEmpty()) return null
+        val panel = homePanel("RECENT FOLDERS")
+        for (folder in recent) {
+            val name = if (folder == homeDirectory()) "Phone storage" else folder.name.ifBlank { folder.absolutePath }
+            addHomeRow(panel, name, abbreviatePath(folder.absolutePath), "\uF07B") { navigateMain(folder) }
+        }
+        return panel
     }
 
     private fun buildCategorySection(): View {
@@ -1341,14 +1571,14 @@ open class MainActivity : Activity() {
         tile.setPadding(dp(3), dp(5), dp(3), dp(4))
         tile.background = functionButtonBackground()
         tile.setOnClickListener { showCategoryFiles(category) }
-        tile.addView(glyphView(category.glyph, iconColor(false), max(22, outputTextSizeSp + 8)), LinearLayout.LayoutParams(-1, dp(28)))
+        tile.addView(glyphView(category.glyph, moduleButtonTextColor, max(22, outputTextSizeSp + 8)), LinearLayout.LayoutParams(-1, dp(28)))
         val name = label(category.label, max(10, outputTextSizeSp - 2), true)
         name.gravity = Gravity.CENTER
-        name.setTextColor(fileTextColor)
+        name.setTextColor(moduleButtonTextColor)
         tile.addView(name, LinearLayout.LayoutParams(-1, dp(22)))
         val value = label(count?.toString() ?: "...", max(9, outputTextSizeSp - 3), false)
         value.gravity = Gravity.CENTER
-        value.setTextColor(withAlpha(outputTextColor, 185))
+        value.setTextColor(withAlpha(moduleButtonTextColor, 185))
         categoryCountViews[category.label] = value
         tile.addView(value, LinearLayout.LayoutParams(-1, dp(18)))
         val params = LinearLayout.LayoutParams(0, -1, 1f)
@@ -1363,16 +1593,16 @@ open class MainActivity : Activity() {
         row.setPadding(dp(6), 0, dp(6), 0)
         row.background = functionButtonBackground()
         row.setOnClickListener { action() }
-        row.addView(glyphView(glyph, iconColor(false), max(16, outputTextSizeSp + 2)), LinearLayout.LayoutParams(dp(34), -1))
+        row.addView(glyphView(glyph, moduleButtonTextColor, max(16, outputTextSizeSp + 2)), LinearLayout.LayoutParams(dp(34), -1))
         val text = LinearLayout(this)
         text.orientation = LinearLayout.VERTICAL
         text.gravity = Gravity.CENTER_VERTICAL
         val top = label(title, outputTextSizeSp, true)
         top.gravity = Gravity.START or Gravity.BOTTOM
-        top.setTextColor(fileTextColor)
+        top.setTextColor(moduleButtonTextColor)
         val bottom = label(subtitle, max(9, outputTextSizeSp - 3), false)
         bottom.gravity = Gravity.START or Gravity.TOP
-        bottom.setTextColor(withAlpha(outputTextColor, 175))
+        bottom.setTextColor(withAlpha(moduleButtonTextColor, 175))
         text.addView(top, LinearLayout.LayoutParams(-1, dp(24)))
         text.addView(bottom, LinearLayout.LayoutParams(-1, dp(18)))
         row.addView(text, LinearLayout.LayoutParams(0, -1, 1f))
@@ -1391,7 +1621,13 @@ open class MainActivity : Activity() {
         return params
     }
 
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) cursorFromKeys = false
+        return super.dispatchTouchEvent(event)
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode != KeyEvent.KEYCODE_BACK) cursorFromKeys = true
         if (paneDialog == null && handleHardwareKey(event.keyCode, event)) return true
         return super.dispatchKeyEvent(event)
     }
@@ -1510,6 +1746,7 @@ open class MainActivity : Activity() {
     }
 
     private fun reloadPane(pane: PaneState) {
+        folderCountCache.clear()
         val dir = pane.directory
         pane.rows.clear()
         pane.rows.add(FileEntry(dir.parentFile, "/..", true, true))
@@ -1608,7 +1845,7 @@ open class MainActivity : Activity() {
     }
 
     private fun showCategoryRows(category: FileCategory, rows: List<FileEntry>) {
-        if (currentScreen != Screen.TREE || leftRowsView == null || rightListView == null) {
+        if (currentScreen != Screen.TREE || treePanesMissing()) {
             currentScreen = Screen.TREE
             contentHost?.removeAllViews()
             contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
@@ -1755,7 +1992,7 @@ open class MainActivity : Activity() {
     private fun showTrashContents(recordHistory: Boolean = true) {
         if (recordHistory) rememberNavigation()
         categoryLoadVersion++
-        if (currentScreen != Screen.TREE || leftRowsView == null || rightListView == null) {
+        if (currentScreen != Screen.TREE || treePanesMissing()) {
             currentScreen = Screen.TREE
             contentHost?.removeAllViews()
             contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
@@ -1798,6 +2035,8 @@ open class MainActivity : Activity() {
             setBackgroundColor(if (activePanel == Panel.RIGHT) selectionBgColor else headerPanelColor)
             commanderSkin?.style("core", if (activePanel == Panel.RIGHT) "reverse" else "frame")?.displayed?.let { styleCommanderText(this, it, background = true) }
         }
+        renderBreadcrumbs()
+        if (compactLayout() && actionBarScreen != currentScreen) updateFunctionBar()
         commandLineView?.text = "$ " + if (currentScreen == Screen.HOME) "Command…" else "${abbreviatePath(rightPane.directory.absolutePath)} › Command…"
     }
 
@@ -1842,7 +2081,12 @@ open class MainActivity : Activity() {
         override fun getItemId(position: Int): Long = position.toLong()
 
         override fun getView(position: Int, convertView: View?, parent: android.view.ViewGroup?): View {
-            val cell = (convertView as? LinearLayout) ?: newFileRow()
+            if (compactLayout()) {
+                val cell = (convertView?.takeIf { it.tag is CompactRowHolder } as? LinearLayout) ?: newCompactRow()
+                bindCompactRow(cell, rightPane.rows[position], position)
+                return cell
+            }
+            val cell = (convertView?.takeIf { it.tag is FileRowHolder } as? LinearLayout) ?: newFileRow()
             bindFileRow(cell, rightPane.rows[position], position)
             cell.layoutParams = AbsListView.LayoutParams(-1, dp(FILE_ROW_HEIGHT_DP))
             return cell
@@ -1850,6 +2094,101 @@ open class MainActivity : Activity() {
     }
 
     private class FileRowHolder(val prefix: TextView, val label: TextView, val size: TextView, val date: TextView, val dateDivider: View)
+
+    private class CompactRowHolder(val type: TextView, val label: TextView, val meta: TextView)
+
+    private fun newCompactRow(): LinearLayout {
+        val cell = LinearLayout(this)
+        cell.id = R.id.fm_file_row
+        cell.orientation = LinearLayout.HORIZONTAL
+        cell.gravity = Gravity.CENTER_VERTICAL
+        cell.minimumHeight = dp(56)
+        cell.setPadding(dp(4), dp(6), dp(8), dp(6))
+        val type = label("", max(10, outputTextSizeSp - 1), true)
+        type.gravity = Gravity.CENTER
+        cell.addView(type, LinearLayout.LayoutParams(dp(52), -2))
+        val text = LinearLayout(this)
+        text.orientation = LinearLayout.VERTICAL
+        val name = label("", outputTextSizeSp, false)
+        name.setSingleLine(false)
+        name.maxLines = 2
+        name.ellipsize = TextUtils.TruncateAt.END
+        text.addView(name, LinearLayout.LayoutParams(-1, -2))
+        val meta = label("", max(10, outputTextSizeSp - 2), false)
+        meta.ellipsize = TextUtils.TruncateAt.END
+        text.addView(meta, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(3) })
+        cell.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
+        cell.layoutParams = AbsListView.LayoutParams(-1, -2)
+        cell.tag = CompactRowHolder(type, name, meta)
+        return cell
+    }
+
+    private fun bindCompactRow(cell: LinearLayout, entry: FileEntry, index: Int) {
+        val marked = (entry.archivePath ?: entry.file?.absolutePath) in selectedPaths
+        val cursor = pendingCopyPaths.isEmpty() && pendingMovePaths.isEmpty() &&
+            cursorFromKeys && showRightCursorHighlight && activePanel == Panel.RIGHT && index == rightPane.cursor
+        val selected = marked || selectedPaths.isEmpty() && cursor
+        val color = rowTextColor(selected, entry.isDirectory)
+        cell.background = rowSelectionBackground(selected)
+        val holder = cell.tag as CompactRowHolder
+        holder.type.text = if (marked) "[ * ]" else fileTypeTag(entry)
+        holder.label.text = if (entry.isParent) ".. (up one folder)" else entry.label
+        holder.label.setTypeface(appTypeface ?: Typeface.MONOSPACE, if (entry.isDirectory) Typeface.BOLD else Typeface.NORMAL)
+        val modified = entry.file?.lastModified() ?: entry.providerItem?.modified ?: entry.modified
+        val date = if (modified > 0) java.text.SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()).format(java.util.Date(modified)) else ""
+        val size = when {
+            entry.isParent || entry.isSection -> ""
+            entry.isDirectory && entry.file != null -> folderItemCount(entry.file)
+            entry.isDirectory -> "Folder"
+            entry.file != null -> humanSize(entry.file.length())
+            entry.providerItem != null || entry.archivePath != null -> humanSize(entry.size)
+            else -> ""
+        }
+        holder.meta.text = listOf(size, date).filter { it.isNotEmpty() }.joinToString(" · ")
+        holder.meta.visibility = if (holder.meta.text.isEmpty()) View.GONE else View.VISIBLE
+        listOf(holder.type, holder.label).forEach { it.setTextColor(color) }
+        holder.meta.setTextColor(if (selected) selectionTextColor else withAlpha(color, 170))
+        commanderFileStyle(entry, marked, cursor)?.let { style ->
+            cell.setBackgroundColor(style.background)
+            listOf(holder.type, holder.label).forEach { styleCommanderText(it, style) }
+            holder.meta.setTextColor(withAlpha(holder.label.currentTextColor, 170))
+        }
+        cell.contentDescription = when {
+            entry.isParent -> "Parent folder"
+            entry.isDirectory -> "Folder ${entry.label}, ${holder.meta.text}"
+            else -> "File ${entry.label}, ${holder.meta.text}"
+        } + if (marked) ", marked" else ""
+    }
+
+    private fun fileTypeTag(entry: FileEntry): String {
+        if (entry.isParent) return "[ ..]"
+        if (entry.isDirectory) return "[DIR]"
+        if (entry.file == null && entry.providerItem == null && entry.archivePath == null) return ""
+        val ext = entry.label.substringAfterLast('.', "").lowercase(Locale.US)
+        val tag = when {
+            ext in ARCHIVE_EXTENSIONS -> "ZIP"
+            ext in IMAGE_EXTENSIONS -> "IMG"
+            ext in VIDEO_EXTENSIONS -> "VID"
+            ext in AUDIO_EXTENSIONS -> "AUD"
+            ext == "pdf" -> "PDF"
+            ext == "apk" -> "APK"
+            ext in DOCUMENT_EXTENSIONS -> "DOC"
+            ext.isNotEmpty() && ext.length <= 3 -> ext.uppercase(Locale.US)
+            else -> "---"
+        }
+        return "[${tag.padEnd(3)}]"
+    }
+
+    private fun folderItemCount(dir: File): String {
+        val count = folderCountCache.getOrPut(dir.absolutePath) {
+            dir.list()?.count { showHidden || !it.startsWith(".") } ?: -1
+        }
+        return when (count) {
+            -1 -> "Folder"
+            1 -> "1 item"
+            else -> "$count items"
+        }
+    }
 
     private fun newFileRow(): LinearLayout {
         val cell = LinearLayout(this)
@@ -2058,7 +2397,7 @@ open class MainActivity : Activity() {
         if (activeArchive != null && activePanel == Panel.RIGHT) {
             val path = entry.archivePath ?: return
             if (entry.isDirectory) showArchiveDirectory(path)
-            else showOutput("ARCHIVE", "$path\n\n${humanSize(entry.size)}")
+            else activeArchive?.let { previewArchiveEntry(it, path, entry.size) }
             return
         }
         val file = entry.file ?: return
@@ -2078,7 +2417,7 @@ open class MainActivity : Activity() {
             return
         }
         val backend = if (activeProvider?.rootUri == providerRoot) activeProvider!! else SafStorageBackend(this, providerRoot)
-        if (currentScreen != Screen.TREE || leftRowsView == null || rightListView == null) {
+        if (currentScreen != Screen.TREE || treePanesMissing()) {
             currentScreen = Screen.TREE
             contentHost?.removeAllViews()
             contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
@@ -2300,7 +2639,7 @@ open class MainActivity : Activity() {
             rightPane.rows += FileEntry(null, "..", true, isParent = true, archivePath = ArchiveExtractor.parent(directory))
         }
         rightPane.rows += children.take(MAX_ROWS).map {
-            FileEntry(null, it.path.substringAfterLast('/'), it.isDirectory, archivePath = it.path, size = it.size)
+            FileEntry(null, it.path.substringAfterLast('/'), it.isDirectory, archivePath = it.path, size = it.size, modified = it.modified)
         }
         if (rightPane.rows.isEmpty()) rightPane.rows += FileEntry(null, "Archive is empty", false)
         rightPane.cursor = 0
@@ -2326,6 +2665,39 @@ open class MainActivity : Activity() {
         showRightCursorHighlight = false
         updateSelectionBar()
         refreshSelectionHighlights()
+    }
+
+    /** Unpacks one entry into the app cache and hands it to the normal preview flow. */
+    private fun previewArchiveEntry(archive: File, path: String, size: Long) {
+        if (size > ARCHIVE_PREVIEW_MAX_BYTES) {
+            showOutput("ARCHIVE", "$path\n\n${humanSize(size)}\n\nToo large to preview here. Use EXTRACT first.")
+            return
+        }
+        val loadVersion = archiveLoadVersion
+        Thread {
+            val result = runCatching {
+                val dir = File(cacheDir, "archive-preview")
+                dir.deleteRecursively()
+                if (!dir.mkdirs()) throw java.io.IOException("Could not create preview folder")
+                ArchiveExtractor.extractTo(archive, dir, setOf(path)).single()
+            }
+            runOnUiThread {
+                if (loadVersion != archiveLoadVersion || activeArchive != archive) return@runOnUiThread
+                result.fold(
+                    onSuccess = { previewFile(it, displayPath = "${archive.name}/$path") },
+                    onFailure = { showOutput("ARCHIVE", "Could not open $path:\n${it.message}") }
+                )
+            }
+        }.start()
+    }
+
+    private fun showExtractChoices(archive: File) {
+        val folder = ArchiveExtractor.destinationFor(archive).name
+        showActionMenu("Extract", listOf(
+            "Into new folder \"$folder\"" to { extractArchiveNamed() },
+            "Here, without a folder" to { extractArchiveHere() },
+            "Choose folder…" to { prepareArchiveExtractTo() }
+        ))
     }
 
     private fun extractArchiveNamed() {
@@ -2364,7 +2736,7 @@ open class MainActivity : Activity() {
         pendingArchiveExtraction = null
     }
 
-    private fun previewFile(file: File, contentUri: Uri? = null) {
+    private fun previewFile(file: File, contentUri: Uri? = null, displayPath: String = file.absolutePath) {
         if (!file.exists()) {
             showOutput("PREVIEW", "Not found: ${file.absolutePath}")
             return
@@ -2378,6 +2750,10 @@ open class MainActivity : Activity() {
             openArchive(file)
             return
         }
+        if (file.extension.lowercase(Locale.US) in QUICK_PREVIEW_EXTENSIONS) {
+            showQuickPreview(file, contentUri)
+            return
+        }
         if (!isLikelyText(file)) {
             openFile(file, contentUri)
             return
@@ -2389,11 +2765,118 @@ open class MainActivity : Activity() {
                 val read = input.read(buffer)
                 val text = if (read > 0) String(buffer, 0, read, StandardCharsets.UTF_8) else ""
                 val suffix = if (file.length() > PREVIEW_MAX_BYTES) "\n\n... preview capped at $PREVIEW_MAX_BYTES bytes" else ""
-                showOutput("PREVIEW", file.absolutePath + "\n\n" + text + suffix)
+                showOutput("PREVIEW", displayPath + "\n\n" + text + suffix)
             }
         } catch (e: Exception) {
             showOutput("PREVIEW", "Could not read ${file.name}:\n${e.message}")
         }
+    }
+
+    /** Floating terminal window over the current screen; tapping the picture hands off to Android's app picker. */
+    private fun showQuickPreview(file: File, contentUri: Uri?) {
+        dismissQuickPreview()
+        val root = rootView ?: return
+        val scrim = FrameLayout(this)
+        scrim.setBackgroundColor(0x99000000.toInt())
+        scrim.isClickable = true
+        scrim.setOnClickListener { dismissQuickPreview() }
+
+        val window = LinearLayout(this)
+        window.orientation = LinearLayout.VERTICAL
+        window.isClickable = true
+        window.setPadding(dp(4), dp(4), dp(4), dp(4))
+        window.background = CommanderFrameDrawable(outputPanelColor or 0xff000000.toInt(), outputBorderColor, dpFloat(1f), commanderSkin?.doubleFrame == true)
+
+        val titleBar = LinearLayout(this)
+        titleBar.orientation = LinearLayout.HORIZONTAL
+        titleBar.setBackgroundColor(headerPanelColor)
+        val title = label(file.name, outputTextSizeSp, true)
+        title.gravity = Gravity.CENTER_VERTICAL
+        title.ellipsize = TextUtils.TruncateAt.MIDDLE
+        title.setPadding(dp(8), 0, dp(4), 0)
+        title.setTextColor(moduleTextColor)
+        commanderSkin?.style("dialog", "dtitle")?.displayed?.let { styleCommanderText(title, it) }
+        titleBar.addView(title, LinearLayout.LayoutParams(0, -1, 1f))
+        val close = label("X", outputTextSizeSp, true)
+        close.gravity = Gravity.CENTER
+        close.setTextColor(title.currentTextColor)
+        close.contentDescription = "Close preview"
+        close.setOnClickListener { dismissQuickPreview() }
+        titleBar.addView(close, LinearLayout.LayoutParams(dp(48), -1))
+        window.addView(titleBar, LinearLayout.LayoutParams(-1, dp(40)))
+
+        val screen = resources.displayMetrics
+        val stage = FrameLayout(this)
+        stage.setBackgroundColor(0xff000000.toInt())
+        stage.contentDescription = "Open ${file.name} with another app"
+        stage.setOnClickListener { dismissQuickPreview(); openFile(file, contentUri) }
+        val loading = label("loading…", outputTextSizeSp, false)
+        loading.gravity = Gravity.CENTER
+        loading.setTextColor(withAlpha(outputTextColor, 170))
+        stage.addView(loading, FrameLayout.LayoutParams(-1, -1))
+        val image = ImageView(this)
+        image.scaleType = ImageView.ScaleType.FIT_CENTER
+        image.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        stage.addView(image, FrameLayout.LayoutParams(-1, -1))
+        window.addView(stage, LinearLayout.LayoutParams(-1, (screen.heightPixels * 0.45f).toInt()).apply { topMargin = dp(4) })
+
+        val details = mutableListOf(fileTypeTag(FileEntry(file, file.name, false)).trim('[', ']', ' '))
+        if (file.extension.lowercase(Locale.US) in IMAGE_EXTENSIONS) {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            if (bounds.outWidth > 0) details += "${bounds.outWidth}x${bounds.outHeight}"
+        }
+        details += humanSize(file.length())
+        details += java.text.SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()).format(java.util.Date(file.lastModified()))
+        val meta = label(details.joinToString(" · "), max(10, outputTextSizeSp - 1), false)
+        meta.setPadding(dp(8), 0, dp(8), 0)
+        meta.gravity = Gravity.CENTER_VERTICAL
+        meta.setTextColor(outputTextColor)
+        window.addView(meta, LinearLayout.LayoutParams(-1, dp(28)).apply { topMargin = dp(4) })
+        val hint = label("$ tap the preview to open with…", max(10, outputTextSizeSp - 2), false)
+        hint.setPadding(dp(8), 0, dp(8), 0)
+        hint.gravity = Gravity.CENTER_VERTICAL
+        hint.setTextColor(withAlpha(outputTextColor, 150))
+        window.addView(hint, LinearLayout.LayoutParams(-1, dp(22)))
+
+        val buttons = LinearLayout(this)
+        buttons.orientation = LinearLayout.HORIZONTAL
+        // Same light button style as the action bar; dialog buttons assume a light dialog panel behind them.
+        fun button(text: String, action: () -> Unit) {
+            val view = label(text, outputTextSizeSp, true)
+            view.gravity = Gravity.CENTER
+            view.setTextColor(moduleButtonTextColor)
+            view.background = functionButtonBackground()
+            view.setOnClickListener { action() }
+            buttons.addView(view, LinearLayout.LayoutParams(0, dp(48), 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
+        }
+        button("OPEN WITH") { dismissQuickPreview(); openFile(file, contentUri) }
+        button("SHARE") { dismissQuickPreview(); shareFile(file) }
+        button("CLOSE") { dismissQuickPreview() }
+        window.addView(buttons, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+
+        val width = min(screen.widthPixels - dp(32), dp(460))
+        scrim.addView(window, FrameLayout.LayoutParams(width, -2, Gravity.CENTER))
+        root.addView(scrim, FrameLayout.LayoutParams(-1, -1))
+        quickPreview = scrim
+
+        ThumbnailLoader.load(this, file, contentUri, max(screen.widthPixels, screen.heightPixels / 2)) { bitmap ->
+            if (quickPreview !== scrim) return@load
+            if (bitmap != null) {
+                image.setImageBitmap(bitmap)
+                loading.visibility = View.GONE
+            } else {
+                loading.text = "no preview for ${file.extension.lowercase(Locale.US)}\ntap to open with…"
+                loading.setSingleLine(false)
+                loading.maxLines = 2
+            }
+        }
+    }
+
+    private fun dismissQuickPreview() {
+        val preview = quickPreview ?: return
+        quickPreview = null
+        (preview.parent as? android.view.ViewGroup)?.removeView(preview)
     }
 
     private fun editFile(file: File) {
@@ -2492,7 +2975,8 @@ open class MainActivity : Activity() {
         repeat(grid.childCount) { offset ->
             val position = first + offset
             val cell = grid.getChildAt(offset) as? LinearLayout ?: return@repeat
-            rightPane.rows.getOrNull(position)?.let { bindFileRow(cell, it, position) }
+            val entry = rightPane.rows.getOrNull(position) ?: return@repeat
+            if (cell.tag is CompactRowHolder) bindCompactRow(cell, entry, position) else bindFileRow(cell, entry, position)
         }
     }
 
@@ -3835,7 +4319,7 @@ open class MainActivity : Activity() {
     }
 
     private fun showFindRows(query: String, root: File, rows: List<FileEntry>) {
-        if (currentScreen != Screen.TREE || leftRowsView == null || rightListView == null) {
+        if (currentScreen != Screen.TREE || treePanesMissing()) {
             currentScreen = Screen.TREE
             contentHost?.removeAllViews()
             contentHost?.addView(buildTreePanes(), FrameLayout.LayoutParams(-1, -1))
@@ -5062,7 +5546,12 @@ open class MainActivity : Activity() {
     }
 
     private fun glyphView(text: String, color: Int, sizeSp: Int): TextView {
-        val view = label(text, sizeSp, false)
+        // Icons skip the terminal cell renderer, which would squeeze square glyphs into a narrow text cell.
+        val view = TextView(this)
+        view.text = text
+        view.setTextSize(scaledFontSp(sizeSp, fontScaleOffsetSp))
+        view.includeFontPadding = false
+        view.isSingleLine = true
         view.typeface = nerdTypeface()
         view.gravity = Gravity.CENTER
         view.setTextColor(color)
@@ -5088,7 +5577,7 @@ open class MainActivity : Activity() {
             value /= 1024.0
             unit++
         }
-        return if (unit == 0) size.toString() else String.format(Locale.US, "%.1f%s", value, units[unit])
+        return if (unit == 0) "$size B" else String.format(Locale.US, "%.1f%s", value, units[unit])
     }
 
     private fun abbreviatePath(path: String): String {
@@ -6072,6 +6561,9 @@ open class MainActivity : Activity() {
         private val VIDEO_EXTENSIONS = setOf("mp4", "mkv", "mov", "avi", "webm", "3gp", "m4v")
         private val AUDIO_EXTENSIONS = setOf("mp3", "wav", "flac", "m4a", "ogg", "opus", "aac")
         private val DOCUMENT_EXTENSIONS = setOf("txt", "md", "markdown", "pdf", "csv", "html", "xml", "json", "rtf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt")
+        private const val ARCHIVE_PREVIEW_MAX_BYTES = 64L * 1024 * 1024
+        private val QUICK_PREVIEW_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "avif") +
+            setOf("mp4", "mkv", "mov", "avi", "webm", "3gp", "m4v", "mp3", "wav", "flac", "m4a", "ogg", "opus", "aac", "pdf")
         private val ARCHIVE_EXTENSIONS = setOf("zip", "rar", "7z", "tar", "gz", "bz2", "xz", "jar")
         private val DIRECTORY_TYPE_TOKENS = setOf("dir", "dirs", "directory", "directories", "folder", "folders")
         private val SEARCH_TYPE_TOKENS = setOf(
