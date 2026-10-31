@@ -167,6 +167,9 @@ open class MainActivity : Activity() {
     private var cursorFromKeys = false
     private var actionBarScreen: Screen? = null
     private var quickPreview: View? = null
+    private var setupOverlay: View? = null
+    private var setupStep = 0
+    private var setupFirstRun = false
     private var functionBar: LinearLayout? = null
     private var commandLineView: TextView? = null
     private var showHidden = false
@@ -368,7 +371,7 @@ open class MainActivity : Activity() {
             restoringState = savedInstanceState != null,
             incomingRequest = incomingRequest
         )
-        if (showFirstRunTour) showWalkthrough(firstRun = true)
+        if (showFirstRunTour) showSetup(0, firstRun = true)
         else if (shouldRequestInitialStorageAccess(walkthroughComplete, floatingWindow, incomingRequest)) ensureStorageAccess()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             backCallback = android.window.OnBackInvokedCallback { handleBackNavigation() }.also {
@@ -412,6 +415,7 @@ open class MainActivity : Activity() {
             }
             showOutput("INSTALL", "Allow Re:T-UI Files to install unknown apps, then open the APK again.")
         }
+        if (setupOverlay != null && setupStep == 0) showSetup(0, setupFirstRun)
         if (firstResume) {
             firstResume = false
         } else if (::leftPane.isInitialized) {
@@ -476,6 +480,10 @@ open class MainActivity : Activity() {
         }
         activeOperationId?.let {
             cancelOperation(it)
+            return
+        }
+        if (setupOverlay != null) {
+            if (setupStep == 1) showSetup(0, setupFirstRun) else finishSetup()
             return
         }
         if (quickPreview != null) return dismissQuickPreview()
@@ -581,6 +589,7 @@ open class MainActivity : Activity() {
         val root = FrameLayout(this)
         rootView = root
         quickPreview = null
+        setupOverlay = null
         root.isFocusableInTouchMode = true
         root.clipChildren = false
         root.clipToPadding = false
@@ -1507,6 +1516,11 @@ open class MainActivity : Activity() {
         content.orientation = LinearLayout.VERTICAL
         content.setPadding(0, 0, 0, dp(8))
         scroll.addView(content, FrameLayout.LayoutParams(-1, -2))
+        if (!hasStorageAccess()) {
+            val access = homePanel("STORAGE ACCESS")
+            addHomeRow(access, "Not granted", "Tap to grant access", "\uF023") { ensureStorageAccess(userInitiated = true) }
+            content.addView(access, sectionParams())
+        }
         content.addView(buildHomeSearchRow(), LinearLayout.LayoutParams(-1, dp(48)).apply { setMargins(dp(4), dp(4), dp(4), dp(2)) })
         content.addView(buildCategorySection(), sectionParams())
         buildRecentSection()?.let { content.addView(it, sectionParams()) }
@@ -4715,7 +4729,7 @@ open class MainActivity : Activity() {
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "TOUR") {
             dialog.dismiss()
-            showWalkthrough()
+            showSetup(1)
         }
         addDialogButton(buttons, "OK") { dialog.dismiss() }
         val buttonParams = LinearLayout.LayoutParams(-1, dp(48))
@@ -4751,44 +4765,89 @@ open class MainActivity : Activity() {
             "Tab/Left switches pane"
     }
 
-    private fun showWalkthrough(step: Int = 0, firstRun: Boolean = false) {
-        val pages = listOf(
-            "BROWSE\n\nTap a directory on the left to select it; tap it again to open it on the right. Folder contents stay on the right, so you can keep your bearings while you browse.",
-            "SELECT AND ACT\n\nLong-press a file or folder to select it. Then copy, move, share, create a ZIP, or send it to Trash. Transfers show progress and can be cancelled.",
-            "FIND YOUR FILES\n\nSearch by name or type, and add filters such as size>10M, size<500K, newer>7d, or older>12h.\n\nAndroid storage access is needed for browsing and managing files across phone and removable storage. You remain in control of that permission."
-        )
-        val page = step.coerceIn(pages.indices)
-        val panel = dialogPanel("QUICK TOUR ${page + 1}/${pages.size}")
-        val body = label(pages[page], max(10, outputTextSizeSp - 1), false)
-        body.gravity = Gravity.START
-        body.setSingleLine(false)
-        body.setTextColor(outputTextColor)
-        body.setPadding(dp(8), dp(12), dp(8), dp(12))
-        val bodyScroll = ScrollView(this)
-        bodyScroll.addView(body, FrameLayout.LayoutParams(-1, -2))
-        panel.addView(bodyScroll, LinearLayout.LayoutParams(-1, dp(300)))
+    /** Full-screen first-run setup in the terminal style: storage access, then a quick start. */
+    private fun showSetup(step: Int, firstRun: Boolean = false) {
+        val root = rootView ?: return
+        setupOverlay?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
+        setupStep = step
+        setupFirstRun = firstRun
+        val page = FrameLayout(this)
+        page.isClickable = true
+        page.setBackgroundColor(outputPanelColor or 0xff000000.toInt())
+        page.setPadding(dp(20), systemInsetTop + dp(24), dp(20), dp(16))
 
-        lateinit var dialog: PaneDialog
-        val buttons = dialogButtonRow()
-        if (page > 0) addDialogButton(buttons, "BACK") {
-            dialog.dismiss()
-            showWalkthrough(page - 1, firstRun)
+        val content = LinearLayout(this)
+        content.orientation = LinearLayout.VERTICAL
+        val dim = withAlpha(outputTextColor, 140)
+        fun line(text: String, color: Int, bold: Boolean = false, top: Int = 14, sizeOffset: Int = 0) {
+            // Plain TextView in the app font: the terminal cell renderer ignores line spacing on wrapped paragraphs.
+            val view = TextView(this)
+            view.text = text
+            view.typeface = Typeface.create(appTypeface ?: Typeface.MONOSPACE, if (bold) Typeface.BOLD else Typeface.NORMAL)
+            view.setTextSize(scaledFontSp(outputTextSizeSp + 1 + sizeOffset, fontScaleOffsetSp))
+            view.setTextColor(color)
+            view.setLineSpacing(dpFloat(5f), 1f)
+            content.addView(view, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(top) })
         }
-        if (firstRun) addDialogButton(buttons, "SKIP") { finishWalkthrough(dialog, true) }
-        if (page < pages.lastIndex) addDialogButton(buttons, "NEXT") {
-            dialog.dismiss()
-            showWalkthrough(page + 1, firstRun)
+        line("// step ${step + 1} of 2", dim, top = 0)
+        if (step == 0) {
+            val granted = hasStorageAccess()
+            line("$ storage access", moduleTextColor, bold = true, sizeOffset = 2)
+            line("// required · FM can't list your files without it", dim, top = 8)
+            line("FM reads and manages files on your phone and SD card: browsing, previews, copy, move, ZIP and Trash. " +
+                "It doesn't upload anything, and Android still keeps folders like Android/data off-limits.", outputTextColor, top = 18)
+            line("You can change this any time in Android settings or from More › File › Storage access.", outputTextColor)
+            val status = LinearLayout(this)
+            status.orientation = LinearLayout.HORIZONTAL
+            status.addView(label("access: ", outputTextSizeSp, false).apply { setTextColor(dim) })
+            status.addView(label(if (granted) "granted" else "not granted", outputTextSizeSp, true).apply {
+                setTextColor(if (granted) directoryTextColor else moduleTextColor)
+            })
+            content.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(22) })
         } else {
-            addDialogButton(buttons, "DONE") { finishWalkthrough(dialog, firstRun) }
+            line("$ quick start", moduleTextColor, bold = true, sizeOffset = 2)
+            line("// tap a file to preview it · tap the preview to open with…", dim, top = 18)
+            line("// long-press to select · then copy, move, zip, share or trash", dim)
+            line("// tap any part of the path bar to jump back", dim)
+            line("// home shows categories, recent folders and storage", dim)
+            line("// $ command line for power use · type `help`", dim)
+            line("// from Re:T-UI Launcher: files · files -open <dir> · files -search <name>", dim)
         }
-        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
-        dialog = showDialogPanel(panel)
+        val scroll = ScrollView(this)
+        scroll.addView(content, FrameLayout.LayoutParams(-1, -2))
+        page.addView(scroll, FrameLayout.LayoutParams(-1, -1).apply { bottomMargin = dp(56) })
+
+        val actions = LinearLayout(this)
+        actions.orientation = LinearLayout.HORIZONTAL
+        actions.gravity = Gravity.CENTER_VERTICAL
+        fun action(text: String, primary: Boolean, onClick: () -> Unit) {
+            val view = label("[$text]", outputTextSizeSp, primary)
+            view.gravity = Gravity.CENTER_VERTICAL
+            view.setPadding(dp(4), 0, dp(12), 0)
+            view.setTextColor(if (primary) moduleTextColor else outputTextColor)
+            view.setOnClickListener { onClick() }
+            actions.addView(view, LinearLayout.LayoutParams(-2, dp(48)))
+        }
+        fun spacer() = actions.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        if (step == 0) {
+            if (!hasStorageAccess()) action("grant access", true) { ensureStorageAccess() }
+            spacer()
+            if (hasStorageAccess()) action("next", true) { showSetup(1, firstRun) } else action("skip", false) { showSetup(1, firstRun) }
+        } else {
+            action("back", false) { showSetup(0, firstRun) }
+            spacer()
+            action("done", true) { finishSetup() }
+        }
+        page.addView(actions, FrameLayout.LayoutParams(-1, dp(48), Gravity.BOTTOM))
+        root.addView(page, FrameLayout.LayoutParams(-1, -1))
+        setupOverlay = page
     }
 
-    private fun finishWalkthrough(dialog: PaneDialog, requestStorage: Boolean) {
+    private fun finishSetup() {
         themePrefs().edit().putBoolean(PREF_WALKTHROUGH_COMPLETE, true).apply()
-        dialog.dismiss()
-        if (requestStorage) ensureStorageAccess()
+        setupOverlay?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
+        setupOverlay = null
+        if (currentScreen == Screen.HOME) showHome(recordHistory = false)
     }
 
     private fun privacySummary(): String =

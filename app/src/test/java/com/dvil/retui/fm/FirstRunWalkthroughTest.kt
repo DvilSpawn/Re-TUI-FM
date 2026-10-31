@@ -13,9 +13,9 @@ class FirstRunWalkthroughTest {
         assertFalse(shouldShowFirstRunWalkthrough(false, false, false, true))
     }
 
-    @Test fun storagePromptWaitsForCompletionExceptForBypassedLaunches() {
+    @Test fun storagePromptOnlyForLauncherDrivenLaunches() {
         assertFalse(shouldRequestInitialStorageAccess(false, false, false))
-        assertTrue(shouldRequestInitialStorageAccess(true, false, false))
+        assertFalse(shouldRequestInitialStorageAccess(true, false, false))
         assertTrue(shouldRequestInitialStorageAccess(false, true, false))
         assertTrue(shouldRequestInitialStorageAccess(false, false, true))
     }
