@@ -78,6 +78,7 @@ open class MainActivity : Activity() {
         }
     }
     private var commanderSkin: CommanderSkin? = null
+    private var usingLauncherPalette = false
     private enum class Panel { LEFT, RIGHT }
     private enum class Screen { HOME, TREE }
     private enum class SortMode { NAME_ASC, NAME_DESC, MODIFIED_NEWEST, MODIFIED_OLDEST, SIZE_LARGEST, SIZE_SMALLEST, TYPE }
@@ -167,7 +168,9 @@ open class MainActivity : Activity() {
     private var cursorFromKeys = false
     private var actionBarScreen: Screen? = null
     private var quickPreview: View? = null
+    private var pendingListPosition: Pair<Int, Int>? = null
     private var setupOverlay: View? = null
+    private var workspaceBorder: FrameLayout? = null
     private var setupStep = 0
     private var setupFirstRun = false
     private var functionBar: LinearLayout? = null
@@ -365,14 +368,14 @@ open class MainActivity : Activity() {
         displayIncomingIntent(intent, start)
         val walkthroughComplete = themePrefs().getBoolean(PREF_WALKTHROUGH_COMPLETE, false)
         val incomingRequest = shouldOpenTree(intent) || (intent?.action != null && intent?.action != Intent.ACTION_MAIN)
-        val showFirstRunTour = shouldShowFirstRunWalkthrough(
+        val showFirstRunTour = shouldShowSetup(
             completed = walkthroughComplete,
             floatingWindow = floatingWindow,
             restoringState = savedInstanceState != null,
-            incomingRequest = incomingRequest
+            incomingRequest = incomingRequest,
+            storageGranted = hasStorageAccess()
         )
         if (showFirstRunTour) showSetup(0, firstRun = true)
-        else if (shouldRequestInitialStorageAccess(walkthroughComplete, floatingWindow, incomingRequest)) ensureStorageAccess()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             backCallback = android.window.OnBackInvokedCallback { handleBackNavigation() }.also {
                 onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, it)
@@ -402,7 +405,8 @@ open class MainActivity : Activity() {
         rightPane = PaneState(start)
         setContentView(buildUi())
         displayIncomingIntent(intent, start)
-        if (shouldOpenTree(intent) || (intent?.action != null && intent.action != Intent.ACTION_MAIN)) ensureStorageAccess()
+        // Explain and grant inside the FM window rather than jumping to Android settings.
+        if (!hasStorageAccess()) showSetup(0, firstRun = true)
     }
 
     override fun onResume() {
@@ -419,8 +423,22 @@ open class MainActivity : Activity() {
         if (firstResume) {
             firstResume = false
         } else if (::leftPane.isInitialized) {
-            if (currentScreen == Screen.HOME) showHome(recordHistory = false)
-            else activeCategory?.let { showCategoryFiles(it, recordHistory = false) } ?: reloadAll()
+            // Returning from another app (Open with, settings) refreshes in place instead of jumping to the top.
+            val category = activeCategory
+            when {
+                currentScreen == Screen.HOME -> showHome(recordHistory = false)
+                category != null -> {
+                    pendingListPosition = currentListPosition()
+                    val loadVersion = ++categoryLoadVersion
+                    Thread { loadCategoryRows(category, loadVersion) }.start()
+                }
+                // Search results, Trash, providers and archives keep their rows; re-running them would lose context.
+                activeArchive != null || rightVirtualTitle != null -> refreshSelectionHighlights()
+                else -> {
+                    pendingListPosition = currentListPosition()
+                    reloadAll()
+                }
+            }
         }
     }
 
@@ -612,6 +630,7 @@ open class MainActivity : Activity() {
                 max(dp(6), edges[2]), max(dp(6), edges[3]))
             addView(main, FrameLayout.LayoutParams(-1, -1))
         }
+        workspaceBorder = border
         val header = buildWorkspaceHeader(main)
         val frame = FrameLayout(this).apply {
             clipChildren = false
@@ -1090,6 +1109,18 @@ open class MainActivity : Activity() {
         val chipWidth = chips.maxOfOrNull { it.paint.measureText(it.text.toString()).toInt() + it.paddingLeft + it.paddingRight } ?: 0
         chips.forEach { it.layoutParams = LinearLayout.LayoutParams(chipWidth, -1) }
         row.setPadding(dp(6), 0, dp(6), 0)
+        row.addOnLayoutChangeListener { view, left, _, right, _, _, _, _, _ ->
+            // Narrow floating windows: share the width equally instead of pushing the last chip off-screen.
+            val needed = chips.size * chipWidth + view.paddingLeft + view.paddingRight
+            if (right - left in 1 until needed && chips.first().layoutParams.width != 0) {
+                view.post {
+                    chips.forEach { chip ->
+                        chip.setPadding(dp(2), 0, dp(2), 0)
+                        chip.layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(2), 0, dp(2), 0) }
+                    }
+                }
+            }
+        }
         bar.addView(row, LinearLayout.LayoutParams(-1, -1))
     }
 
@@ -1251,6 +1282,9 @@ open class MainActivity : Activity() {
         return pane
     }
 
+    private fun breadcrumbTextColor(): Int =
+        commanderSkin?.style("core", "header")?.displayed?.foreground ?: headerTextColor
+
     private fun buildBreadcrumbBar(): View {
         val bar = LinearLayout(this)
         bar.orientation = LinearLayout.HORIZONTAL
@@ -1258,7 +1292,7 @@ open class MainActivity : Activity() {
         commanderSkin?.style("core", "header")?.displayed?.let { style -> bar.setBackgroundColor(style.background) }
         val up = label("<", outputTextSizeSp + 2, true)
         up.gravity = Gravity.CENTER
-        up.setTextColor(outputTextColor)
+        up.setTextColor(breadcrumbTextColor())
         up.contentDescription = "Up one folder"
         up.setOnClickListener { goParent() }
         bar.addView(up, LinearLayout.LayoutParams(dp(48), -1))
@@ -1279,13 +1313,13 @@ open class MainActivity : Activity() {
             val view = label(text, outputTextSizeSp, current)
             view.gravity = Gravity.CENTER_VERTICAL
             view.setPadding(dp(6), 0, dp(6), 0)
-            view.setTextColor(if (current) selectionTextColor else outputTextColor)
+            view.setTextColor(if (current) breadcrumbTextColor() else withAlpha(breadcrumbTextColor(), 200))
             action?.let { view.setOnClickListener { it() } }
             crumbs.addView(view, LinearLayout.LayoutParams(-2, -1))
         }
         fun separator() = crumbs.addView(label("/", outputTextSizeSp, false).apply {
             gravity = Gravity.CENTER_VERTICAL
-            setTextColor(withAlpha(outputTextColor, 170))
+            setTextColor(withAlpha(breadcrumbTextColor(), 150))
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }, LinearLayout.LayoutParams(-2, -1))
         val virtual = rightVirtualTitle
@@ -2075,8 +2109,9 @@ open class MainActivity : Activity() {
         val footer = if (panel == Panel.LEFT) leftFooterView else rightFooterView
         val disk = if (panel == Panel.LEFT) leftDiskView else rightDiskView
         clampCursor(pane)
+        var restoredPosition = false
         if (panel == Panel.RIGHT) {
-            renderFileList()
+            restoredPosition = renderFileList()
         } else {
             val previousScroll = leftScrollView?.scrollY ?: 0
             rowsView?.removeAllViews()
@@ -2085,20 +2120,27 @@ open class MainActivity : Activity() {
             }
             leftScrollView?.post { leftScrollView?.scrollTo(0, previousScroll) }
         }
-        if (panel == Panel.RIGHT) keepSelectionVisible(panel)
+        if (panel == Panel.RIGHT && !restoredPosition) keepSelectionVisible(panel)
         val selected = pane.rows.getOrNull(pane.cursor)?.takeUnless { it.isSection }?.label ?: pane.directory.name
         footer?.text = selected
         footer?.contentDescription = "$selected. ${paneSummary(pane)}"
         disk?.text = if (panel == Panel.LEFT) "${pane.rows.count { it.isDirectory && !it.isParent }} dirs" else diskSummary(pane.directory)
     }
 
-    private fun renderFileList() {
-        val grid = rightListView ?: return
+    /** Returns true when a saved scroll position was restored instead of scrolling to the cursor. */
+    private fun renderFileList(): Boolean {
+        val grid = rightListView ?: return false
         val adapter = rightListAdapter ?: RightListAdapter().also { rightListAdapter = it }
         if (grid.adapter !== adapter) grid.adapter = adapter
         adapter.notifyDataSetChanged()
-        grid.post { grid.setSelection(rightPane.cursor) }
+        val restore = pendingListPosition
+        pendingListPosition = null
+        grid.post { if (restore != null) grid.setSelectionFromTop(restore.first, restore.second) else grid.setSelection(rightPane.cursor) }
+        return restore != null
     }
+
+    private fun currentListPosition(): Pair<Int, Int>? =
+        rightListView?.let { list -> list.firstVisiblePosition to (list.getChildAt(0)?.top ?: 0) }
 
     private inner class RightListAdapter : BaseAdapter() {
         override fun getCount(): Int = rightPane.rows.size
@@ -2832,7 +2874,7 @@ open class MainActivity : Activity() {
         titleView.gravity = Gravity.CENTER_VERTICAL
         titleView.ellipsize = TextUtils.TruncateAt.MIDDLE
         titleView.setPadding(dp(8), 0, dp(4), 0)
-        titleView.setTextColor(moduleTextColor)
+        titleView.setTextColor(headerTextColor)
         commanderSkin?.style("dialog", "dtitle")?.displayed?.let { styleCommanderText(titleView, it) }
         titleBar.addView(titleView, LinearLayout.LayoutParams(0, -1, 1f))
         val close = label("X", outputTextSizeSp, true)
@@ -4739,42 +4781,47 @@ open class MainActivity : Activity() {
     }
 
     private fun helpText(): String {
-        return "Menus:\n" +
-            "Places: saved folders, recent folders, providers and folder browser\n" +
-            "File: view, edit, copy, move, trash, properties and selection\n" +
-            "Command: find file, parent folder, breadcrumbs, background jobs and file commands\n" +
-            "Options: appearance, panel options, settings\n" +
-            "Sort: name, modification date, size and file type\n" +
-            "\nTouch:\nTap a directory on the left to select it. Tap it again to show its contents on the right.\n" +
-            "Tap right-pane items to open; long-press to mark for batch actions.\n" +
+        val browsing = if (compactLayout()) {
+            "Home shows search, categories, recent folders and storage. Browse returns to your last folder.\n" +
+                "Tap a folder to open it. Tap any part of the path bar to jump back; < goes up one folder.\n" +
+                "Tap a file to preview it; tap the preview or OPEN WITH to choose an app.\n" +
+                "Long-press to select, then tap more items. COPY, MOVE, TRASH, SHARE and ZIP appear at the bottom.\n" +
+                "Bottom bar: Places, Search, Sort, New and More (File, Selection, View, Command, Options, Help)."
+        } else {
+            "The left pane lists folders: tap once to select, again to open it on the right.\n" +
+                "Tap right-pane items to open or preview them; long-press to mark them for batch actions.\n" +
+                "Menus: Places, File, Command, Options and Sort. F1-F10 mirror the function bar."
+        }
+        return "Browsing:\n$browsing\n" +
+            "\nPreviews:\n" +
+            "Images, video, audio and PDFs open in a floating window. Text shows line numbers; tap the $ line to toggle wrap.\n" +
+            "Files inside archives can be previewed without extracting; EXTRACT asks where to put them.\n" +
             "\nSearch:\n" +
-            "Open Command > Find file or Search device.\n" +
-            "Long-press a folder and choose Search this folder to search inside it.\n" +
-            "Add size>10M or size<500K for size limits.\n" +
-            "Add newer>7d or older>12h for modified-date limits.\n" +
-            "Use a file type such as pdf, image, audio, archive, apk, or folder.\n" +
-            "\nWhat's new in ${currentVersionName()}:\n" +
-            "First-run guidance, expanded Help and privacy details, support links, and local Appearance color controls.\n" +
-            "\nPrivacy:\n" +
-            privacySummary() + "\n" +
-            "\nCustomization:\n" +
-            "Follows Launcher themes and supports font choice/import, font scale, hidden files, and sorted file lists.\n" +
+            "Search by name or type: pdf, image, audio, archive, apk or folder.\n" +
+            "Add size>10M or size<500K for size limits, newer>7d or older>12h for dates.\n" +
+            "Android keeps folders like Android/data off-limits, so they are never searched.\n" +
+            "\nCommand line:\n" +
+            "Tap the $ line for file commands. From Re:T-UI Launcher: files, files -open <dir>, files -search <name>.\n" +
+            "\nAppearance:\n" +
+            "FM uses your Launcher colors by default, adjusted where needed so text stays readable.\n" +
+            "Options > Appearance switches to Re:TUI gray or one of the MC skins, and sets font and font scale.\n" +
             "\nKeyboard:\n" +
-            "Up/Down move; Left/Right switch pane\n" +
-            "Enter opens selected\n" +
-            "Tab/Left switches pane"
+            "Up/Down move, Page Up/Down and Home/End jump, Enter opens, / opens the command line, F1-F10 run the function keys" +
+                (if (compactLayout()) "." else ", Left/Right or Tab switch pane.") + "\n" +
+            "\nPrivacy:\n" +
+            privacySummary()
     }
 
     /** Full-screen first-run setup in the terminal style: storage access, then a quick start. */
     private fun showSetup(step: Int, firstRun: Boolean = false) {
-        val root = rootView ?: return
+        val root = workspaceBorder ?: return
         setupOverlay?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
         setupStep = step
         setupFirstRun = firstRun
         val page = FrameLayout(this)
         page.isClickable = true
         page.setBackgroundColor(outputPanelColor or 0xff000000.toInt())
-        page.setPadding(dp(20), systemInsetTop + dp(24), dp(20), dp(16))
+        page.setPadding(dp(16), dp(16), dp(16), dp(8))
 
         val content = LinearLayout(this)
         content.orientation = LinearLayout.VERTICAL
@@ -4847,7 +4894,12 @@ open class MainActivity : Activity() {
         themePrefs().edit().putBoolean(PREF_WALKTHROUGH_COMPLETE, true).apply()
         setupOverlay?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
         setupOverlay = null
-        if (currentScreen == Screen.HOME) showHome(recordHistory = false)
+        if (!::leftPane.isInitialized) return
+        if (hasStorageAccess()) {
+            // Re-run the original request (plain launch, files -open, files -search) now that files are readable.
+            paneDialog?.dismiss()
+            displayIncomingIntent(intent, resolveStartDirectory(intent))
+        } else if (currentScreen == Screen.HOME) showHome(recordHistory = false)
     }
 
     private fun privacySummary(): String =
@@ -5078,13 +5130,12 @@ open class MainActivity : Activity() {
     private fun showAppearanceMenu() {
         val prefs = themePrefs()
         val overridden = prefs.getBoolean(PREF_THEME_COLORS_OVERRIDDEN, false)
-        val launcherAvailable = prefs.getBoolean(PREF_LAUNCHER_THEME_AVAILABLE, false) ||
-            prefs.contains(RetuiVisualContract.BG)
+        val launcherAvailable = launcherThemeAvailable()
         val source = when {
             overridden -> "Custom colors"
             commanderSkin != null -> commanderSkin!!.id
-            launcherAvailable -> "MC body / Launcher frame"
-            else -> "MC default"
+            usingLauncherPalette -> "Launcher colors"
+            else -> "Re:TUI gray"
         }
         val items = mutableListOf<Pair<String, () -> Unit>>()
         items += "Theme source: $source" to {
@@ -5095,7 +5146,8 @@ open class MainActivity : Activity() {
             val license = assets.open("mc-skins/LICENSE.txt").bufferedReader().use { it.readText() }
             showOutput("MC SKIN CREDITS", "Midnight Commander skin collection\nhttps://github.com/MidnightCommander/mc\n\nOriginal author credits are preserved in the bundled skin files.\n\n$license")
         }
-        items += "Use Re:TUI gray colors" to { applyCommanderSkin(null) }
+        if (launcherAvailable) items += "Use Launcher colors" to { applyThemeChoice(null) }
+        items += "Use Re:TUI gray colors" to { applyThemeChoice(RETUI_GRAY_CHOICE) }
         themeColorBindings().forEach { binding ->
             items += "${binding.label}: ${colorHex(binding.get())}" to { showThemeColorEditor(binding) }
         }
@@ -5109,8 +5161,16 @@ open class MainActivity : Activity() {
     }
 
     private fun showCommanderSkinPicker() {
-        val skins = listOf<CommanderSkin?>(null) + commanderSkins
-        var chosen = skins.indexOfFirst { it?.id == themePrefs().getString(PREF_COMMANDER_SKIN, null) }.coerceAtLeast(0)
+        val launcherAvailable = launcherThemeAvailable()
+        val choiceIds = (if (launcherAvailable) listOf<String?>(null) else emptyList()) + RETUI_GRAY_CHOICE + commanderSkins.map { it.id }
+        val skins = choiceIds.map { id -> commanderSkins.firstOrNull { it.id == id } }
+        fun choiceLabel(position: Int) = when (choiceIds[position]) {
+            null -> "Launcher colors"
+            RETUI_GRAY_CHOICE -> "Re:TUI gray"
+            else -> skins[position]?.id ?: "?"
+        }
+        val current = themePrefs().getString(PREF_COMMANDER_SKIN, null)
+        var chosen = choiceIds.indexOf(if (current == null && !launcherAvailable) RETUI_GRAY_CHOICE else current).coerceAtLeast(0)
         val panel = dialogPanel("MC skins")
         val name = label("", outputTextSizeSp, true)
         name.setSingleLine(false)
@@ -5138,8 +5198,8 @@ open class MainActivity : Activity() {
                     ellipsize = TextUtils.TruncateAt.END
                     layoutParams = AbsListView.LayoutParams(-1, dp(40))
                 }
-                row.text = (if (position == chosen) "● " else "  ") + (skins[position]?.id ?: "Re:TUI gray")
-                row.contentDescription = skins[position]?.let { "${it.id}, ${it.description}" } ?: "Re:TUI gray"
+                row.text = (if (position == chosen) "● " else "  ") + choiceLabel(position)
+                row.contentDescription = skins[position]?.let { "${it.id}, ${it.description}" } ?: choiceLabel(position)
                 row.setTextColor(if (position == chosen) selectionTextColor else outputTextColor)
                 row.setBackgroundColor(if (position == chosen) selectionBgColor else outputPanelColor)
                 return row
@@ -5149,10 +5209,21 @@ open class MainActivity : Activity() {
         panel.addView(list, LinearLayout.LayoutParams(-1, dp(240)))
         fun renderPreview() {
             val skin = skins[chosen]
-            name.text = skin?.let { "${it.id}\n${it.colorMode}" } ?: "Re:TUI gray\nCurrent compact palette"
-            val core = skin?.style("core")?.displayed ?: CommanderStyle(Color.rgb(210, 210, 210), Color.rgb(55, 55, 55))
-            val selected = skin?.style("core", "selected")?.displayed ?: CommanderStyle(Color.WHITE, Color.rgb(0, 96, 96))
-            val directory = skin?.style("filehighlight", "directory")?.displayed ?: core.copy(foreground = Color.rgb(200, 196, 151))
+            val launcher = choiceIds[chosen] == null
+            name.text = skin?.let { "${it.id}\n${it.colorMode}" }
+                ?: if (launcher) "Launcher colors\nAdjusted for readability" else "Re:TUI gray\nCurrent compact palette"
+            val prefs = themePrefs()
+            fun stored(key: String, fallback: Int) = if (prefs.contains(key)) prefs.getInt(key, fallback) else fallback
+            val launcherBase = stored(RetuiVisualContract.OUTPUT_BG, Color.rgb(55, 55, 55))
+            val launcherSelection = Readability.separate(stored(RetuiVisualContract.SELECTION_BG, Color.rgb(0, 96, 96)), launcherBase, 1.6)
+            val core = skin?.style("core")?.displayed ?: if (launcher) CommanderStyle(
+                Readability.ensureContrast(stored(RetuiVisualContract.OUTPUT_TEXT, Color.rgb(210, 210, 210)), launcherBase, Readability.BODY_TEXT), launcherBase
+            ) else CommanderStyle(Color.rgb(210, 210, 210), Color.rgb(55, 55, 55))
+            val selected = skin?.style("core", "selected")?.displayed ?: if (launcher) CommanderStyle(
+                Readability.ensureContrast(stored(RetuiVisualContract.SELECTION_TEXT, Color.WHITE), launcherSelection, Readability.TEXT), launcherSelection
+            ) else CommanderStyle(Color.WHITE, Color.rgb(0, 96, 96))
+            val directory = skin?.style("filehighlight", "directory")?.displayed ?: core.copy(foreground = if (launcher)
+                Readability.ensureContrast(stored(RetuiVisualContract.DIRECTORY_TEXT, core.foreground), launcherBase, Readability.TEXT) else Color.rgb(200, 196, 151))
             val styles = listOf(skin?.style("menu", "menuinactive")?.displayed ?: core,
                 skin?.style("core", "reverse")?.displayed ?: selected,
                 skin?.style("core", "header")?.displayed ?: directory, directory,
@@ -5167,17 +5238,18 @@ open class MainActivity : Activity() {
         lateinit var dialog: PaneDialog
         val buttons = dialogButtonRow()
         addDialogButton(buttons, "CANCEL") { dialog.dismiss(); restoreAppearanceForm() }
-        addDialogButton(buttons, "APPLY") { dialog.dismiss(); applyCommanderSkin(skins[chosen]) }
+        addDialogButton(buttons, "APPLY") { dialog.dismiss(); applyThemeChoice(choiceIds[chosen]) }
         panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
         dialog = showDialogPanel(panel)
         renderPreview()
         list.setSelection(chosen)
     }
 
-    private fun applyCommanderSkin(skin: CommanderSkin?) {
+    /** null = Launcher colours (the default), [RETUI_GRAY_CHOICE], or an MC skin id. */
+    private fun applyThemeChoice(choice: String?) {
         val prefs = themePrefs()
         val editor = prefs.edit().putBoolean(PREF_THEME_COLORS_OVERRIDDEN, false)
-        if (skin == null) editor.remove(PREF_COMMANDER_SKIN) else editor.putString(PREF_COMMANDER_SKIN, skin.id)
+        if (choice == null) editor.remove(PREF_COMMANDER_SKIN) else editor.putString(PREF_COMMANDER_SKIN, choice)
         themeColorBindings().forEach { editor.remove(PREF_THEME_COLOR_PREFIX + it.key) }
         editor.apply()
         refreshThemeUi()
@@ -5976,8 +6048,16 @@ open class MainActivity : Activity() {
         headerTextSizeSp = 11
         inputFontSizeSp = 11
         commanderSkin = null
+        usingLauncherPalette = false
         if (themePrefs().getBoolean(PREF_THEME_COLORS_OVERRIDDEN, false)) return
-        commanderSkin = commanderSkins.firstOrNull { it.id == themePrefs().getString(PREF_COMMANDER_SKIN, null) }
+        val choice = themePrefs().getString(PREF_COMMANDER_SKIN, null)
+        if (choice == null && launcherThemeAvailable()) {
+            // Default: the Launcher's own colours, adjusted only where they would hurt readability.
+            usingLauncherPalette = true
+            applyReadabilityPass()
+            return
+        }
+        commanderSkin = commanderSkins.firstOrNull { it.id == choice }
         commanderSkin?.let { skin ->
             val core = skin.style("core").displayed
             val menu = skin.style("menu", "menuinactive").displayed
@@ -6017,6 +6097,36 @@ open class MainActivity : Activity() {
         inputTextColor = outputTextColor
         selectionBgColor = Color.rgb(0, 96, 96)
         selectionTextColor = Color.WHITE
+        applyReadabilityPass()
+    }
+
+    private fun launcherThemeAvailable(): Boolean {
+        val prefs = themePrefs()
+        return prefs.getBoolean(PREF_LAUNCHER_THEME_AVAILABLE, false) || prefs.contains(RetuiVisualContract.BG) ||
+            prefs.contains(RetuiVisualContract.OUTPUT_BG)
+    }
+
+    /**
+     * Launcher palettes often use several near-identical dark surfaces and one text colour. Surfaces are
+     * separated first so buttons, headers and the selection stay visible, then every text colour is checked
+     * against the surface it is actually drawn on. Saved Launcher values are never rewritten.
+     */
+    private fun applyReadabilityPass() {
+        val base = outputPanelColor
+        moduleButtonBgColor = Readability.separate(moduleButtonBgColor, base, 1.35)
+        headerPanelColor = Readability.separate(headerPanelColor, base, 1.25)
+        selectionBgColor = Readability.separate(selectionBgColor, base, 1.6)
+        outputBorderColor = Readability.ensureContrast(outputBorderColor, base, Readability.NON_TEXT)
+        outputTextColor = Readability.ensureContrast(outputTextColor, base, Readability.BODY_TEXT)
+        fileTextColor = Readability.ensureContrast(fileTextColor, base, Readability.BODY_TEXT)
+        directoryTextColor = Readability.ensureContrast(directoryTextColor, base, Readability.TEXT)
+        moduleTextColor = Readability.ensureContrast(moduleTextColor, base, Readability.TEXT)
+        inputTextColor = Readability.ensureContrast(inputTextColor, base, Readability.TEXT)
+        // Header text appears on header bars and as dialog titles on the output panel.
+        headerTextColor = Readability.ensureContrast(Readability.ensureContrast(headerTextColor, headerPanelColor, Readability.TEXT), base, Readability.TEXT)
+        moduleButtonTextColor = Readability.ensureContrast(moduleButtonTextColor, moduleButtonBgColor, Readability.TEXT)
+        selectionTextColor = Readability.ensureContrast(selectionTextColor, selectionBgColor, Readability.TEXT)
+        launcherHeaderTextColor = Readability.ensureContrast(launcherHeaderTextColor, launcherHeaderColor, Readability.TEXT)
     }
 
     private fun themeColorBindings(): List<ThemeColorBinding> = listOf(
@@ -6735,6 +6845,7 @@ open class MainActivity : Activity() {
         private const val PREF_CUSTOM_FONT_PATH = "custom_font_path"
         private const val PREF_THEME_COLORS_OVERRIDDEN = "theme.colorsOverridden"
         private const val PREF_COMMANDER_SKIN = "theme.commanderSkin"
+        private const val RETUI_GRAY_CHOICE = "retui-gray"
         private const val PREF_THEME_COLOR_PREFIX = "theme.override."
         private const val PREF_LAUNCHER_THEME_AVAILABLE = "theme.launcher.available"
         private const val FONT_MODE_CUSTOM = "custom"

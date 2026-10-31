@@ -5,18 +5,29 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FirstRunWalkthroughTest {
-    @Test fun onlyFreshStandaloneLaunchIsEligible() {
-        assertTrue(shouldShowFirstRunWalkthrough(false, false, false, false))
-        assertFalse(shouldShowFirstRunWalkthrough(true, false, false, false))
-        assertFalse(shouldShowFirstRunWalkthrough(false, true, false, false))
-        assertFalse(shouldShowFirstRunWalkthrough(false, false, true, false))
-        assertFalse(shouldShowFirstRunWalkthrough(false, false, false, true))
+    @Test fun freshLaunchesShowSetupInEitherWindow() {
+        assertTrue(shouldShowSetup(false, false, false, false, true))
+        assertTrue(shouldShowSetup(false, true, false, false, true))
+        assertTrue(shouldShowSetup(false, false, false, false, false))
     }
 
-    @Test fun storagePromptOnlyForLauncherDrivenLaunches() {
-        assertFalse(shouldRequestInitialStorageAccess(false, false, false))
-        assertFalse(shouldRequestInitialStorageAccess(true, false, false))
-        assertTrue(shouldRequestInitialStorageAccess(false, true, false))
-        assertTrue(shouldRequestInitialStorageAccess(false, false, true))
+    @Test fun completedSetupStaysAwayWhenAccessIsGranted() {
+        assertFalse(shouldShowSetup(true, false, false, false, true))
+        assertFalse(shouldShowSetup(true, true, false, false, true))
+    }
+
+    @Test fun restoringStateNeverShowsSetup() {
+        assertFalse(shouldShowSetup(false, false, true, false, false))
+        assertFalse(shouldShowSetup(false, true, true, true, false))
+    }
+
+    @Test fun launcherRequestsSkipSetupOnlyWhenAccessIsGranted() {
+        assertFalse(shouldShowSetup(false, false, false, true, true))
+        assertTrue(shouldShowSetup(true, false, false, true, false))
+        assertTrue(shouldShowSetup(true, true, false, false, false))
+    }
+
+    @Test fun skippedStandaloneLaunchUsesTheHomeReminder() {
+        assertFalse(shouldShowSetup(true, false, false, false, false))
     }
 }
