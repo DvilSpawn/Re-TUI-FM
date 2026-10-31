@@ -1098,7 +1098,7 @@ open class MainActivity : Activity() {
             // Compact chips sized to their label; the full bar height stays tappable.
             val fill = (button.background as? ColorDrawable)?.color ?: moduleButtonBgColor
             button.background = android.graphics.drawable.InsetDrawable(ColorDrawable(fill), 0, dp(6), 0, dp(6))
-            button.setPadding(dp(12), 0, dp(12), 0)
+            button.setPadding(dp(8), 0, dp(8), 0)
             button.contentDescription = description
             button.setOnClickListener { action() }
             if (row.childCount > 0) row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
@@ -1106,7 +1106,10 @@ open class MainActivity : Activity() {
         }
         // Every chip takes the widest label's width so the bar reads as one even set.
         val chips = (0 until row.childCount).map(row::getChildAt).filterIsInstance<TextView>()
-        val chipWidth = chips.maxOfOrNull { it.paint.measureText(it.text.toString()).toInt() + it.paddingLeft + it.paddingRight } ?: 0
+        // The terminal renderer floors the width to whole character cells, so leave one spare cell or labels wrap.
+        val chipWidth = chips.maxOfOrNull {
+            kotlin.math.ceil(it.paint.measureText(it.text.toString() + " ")).toInt() + it.paddingLeft + it.paddingRight
+        } ?: 0
         chips.forEach { it.layoutParams = LinearLayout.LayoutParams(chipWidth, -1) }
         row.setPadding(dp(6), 0, dp(6), 0)
         row.addOnLayoutChangeListener { view, left, _, right, _, _, _, _, _ ->
