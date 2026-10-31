@@ -1112,16 +1112,27 @@ open class MainActivity : Activity() {
         } ?: 0
         chips.forEach { it.layoutParams = LinearLayout.LayoutParams(chipWidth, -1) }
         row.setPadding(dp(6), 0, dp(6), 0)
-        row.addOnLayoutChangeListener { view, left, _, right, _, _, _, _, _ ->
-            // Narrow floating windows: share the width equally instead of pushing the last chip off-screen.
-            val needed = chips.size * chipWidth + view.paddingLeft + view.paddingRight
-            if (right - left in 1 until needed && chips.first().layoutParams.width != 0) {
-                view.post {
-                    chips.forEach { chip ->
-                        chip.setPadding(dp(2), 0, dp(2), 0)
-                        chip.layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(2), 0, dp(2), 0) }
-                    }
+        // Narrow floating windows: chips share the full width (spacers collapse); wide again restores compact chips.
+        fun applyChipMode(fit: Boolean) {
+            for (index in 0 until row.childCount) {
+                val child = row.getChildAt(index)
+                if (child is TextView) {
+                    child.setPadding(dp(if (fit) 8 else 2), 0, dp(if (fit) 8 else 2), 0)
+                    child.layoutParams = if (fit) LinearLayout.LayoutParams(chipWidth, -1)
+                        else LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(2), 0, dp(2), 0) }
+                } else {
+                    child.layoutParams = LinearLayout.LayoutParams(0, 1, if (fit) 1f else 0f)
                 }
+            }
+        }
+        row.tag = true
+        row.addOnLayoutChangeListener { view, left, _, right, _, _, _, _, _ ->
+            val width = right - left
+            if (width <= 0) return@addOnLayoutChangeListener
+            val fit = width >= chips.size * chipWidth + view.paddingLeft + view.paddingRight
+            if (view.tag != fit) {
+                view.tag = fit
+                view.post { applyChipMode(fit) }
             }
         }
         bar.addView(row, LinearLayout.LayoutParams(-1, -1))
