@@ -40,8 +40,13 @@ internal object ThumbnailLoader {
         val extension = file.extension.lowercase()
         if (extension in IMAGE_EXTENSIONS) {
             return if (uri != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) { decoder, _, _ ->
-                    decoder.setTargetSize(sizePx, sizePx)
+                ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) { decoder, info, _ ->
+                    // Scale by the longer side so the bitmap keeps the image's aspect ratio.
+                    val scale = minOf(1f, sizePx.toFloat() / maxOf(info.size.width, info.size.height).coerceAtLeast(1))
+                    decoder.setTargetSize(
+                        (info.size.width * scale).toInt().coerceAtLeast(1),
+                        (info.size.height * scale).toInt().coerceAtLeast(1)
+                    )
                     decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_LOW_RAM
                 }
             } else decodeSampled(file, sizePx)
