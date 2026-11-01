@@ -4256,6 +4256,7 @@ open class MainActivity : Activity() {
             is FmCommand.Extract -> extractFromCommand(command)
             is FmCommand.Favorite -> favoriteFromCommand(command)
             FmCommand.Recent -> showRecentMenu()
+            FmCommand.Help -> showHelpPopup()
         }
     }
 
@@ -4799,8 +4800,9 @@ open class MainActivity : Activity() {
             "Home shows search, categories, recent folders and storage. Browse returns to your last folder.\n" +
                 "Tap a folder to open it. Tap any part of the path bar to jump back; < goes up one folder.\n" +
                 "Tap a file to preview it; tap the preview or OPEN WITH to choose an app.\n" +
-                "Long-press to select, then tap more items. COPY, MOVE, TRASH, SHARE and ZIP appear at the bottom.\n" +
-                "Bottom bar: Places, Search, Sort, New and More (File, Selection, View, Command, Options, Help)."
+                "Long-press to select, then tap more items. COPY, MOVE, TRASH, SHARE and ZIP appear at the bottom; EXTRACT for archives.\n" +
+                "Bottom bar: Browse, Places, Search and More on Home; Places, Search, Sort, New and More in folders.\n" +
+                "More holds File, Selection, View, Command, Options and Help."
         } else {
             "The left pane lists folders: tap once to select, again to open it on the right.\n" +
                 "Tap right-pane items to open or preview them; long-press to mark them for batch actions.\n" +
@@ -4815,7 +4817,8 @@ open class MainActivity : Activity() {
             "Add size>10M or size<500K for size limits, newer>7d or older>12h for dates.\n" +
             "Android keeps folders like Android/data off-limits, so they are never searched.\n" +
             "\nCommand line:\n" +
-            "Tap the $ line for file commands. From Re:T-UI Launcher: files, files -open <dir>, files -search <name>.\n" +
+            "Tap the $ line for file commands: cd, ls, pwd, find, open, preview, mkdir, rename, copy, move, trash, zip, extract, fav, recent, help.\n" +
+            "From Re:T-UI Launcher: files, files -open <path>, files -search <name> [type], files -ls, files -share [file].\n" +
             "\nAppearance:\n" +
             "FM uses your Launcher colors by default, adjusted where needed so text stays readable.\n" +
             "Options > Appearance switches to Re:TUI gray or one of the MC skins, and sets font and font scale.\n" +
@@ -4872,7 +4875,7 @@ open class MainActivity : Activity() {
             line("// tap any part of the path bar to jump back", dim)
             line("// home shows categories, recent folders and storage", dim)
             line("// $ command line for power use · type `help`", dim)
-            line("// from Re:T-UI Launcher: files · files -open <dir> · files -search <name>", dim)
+            line("// from Re:T-UI Launcher: files · files -open <path> · files -search <name>", dim)
         }
         val scroll = ScrollView(this)
         scroll.addView(content, FrameLayout.LayoutParams(-1, -2))

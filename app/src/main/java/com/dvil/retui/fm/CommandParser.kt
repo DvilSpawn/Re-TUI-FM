@@ -15,6 +15,7 @@ internal sealed interface FmCommand {
     data class Extract(val archive: String, val destination: String?) : FmCommand
     data class Favorite(val action: String, val path: String?) : FmCommand
     data object Recent : FmCommand
+    data object Help : FmCommand
 }
 
 internal object CommandParser {
@@ -45,6 +46,7 @@ internal object CommandParser {
                 FmCommand.Favorite(parts[1].lowercase(), parts.getOrNull(2))
             }
             "recent" -> requireSize(parts, 1) { FmCommand.Recent }
+            "help" -> requireSize(parts, 1) { FmCommand.Help }
             else -> error("Unknown command: ${parts.first()}")
         }
     }

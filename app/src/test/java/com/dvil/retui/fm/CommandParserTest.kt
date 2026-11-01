@@ -13,6 +13,10 @@ class CommandParserTest {
         )
     }
 
+    @Test fun parsesHelp() {
+        assertEquals(FmCommand.Help, CommandParser.parse("help").getOrThrow())
+    }
+
     @Test fun rejectsShellSyntaxAndMalformedCommands() {
         assertTrue(CommandParser.parse("trash a; rm -rf /").isFailure)
         assertTrue(CommandParser.parse("rename only-one-name").isFailure)

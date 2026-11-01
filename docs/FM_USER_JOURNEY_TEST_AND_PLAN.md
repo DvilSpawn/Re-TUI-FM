@@ -64,7 +64,7 @@ Deletion asks for confirmation and moves items into `.retui-trash`; Recently del
 
 ### Resolved - Archive creation
 
-Long-press multi-select now exposes ZIP creation alongside bulk copy, move, trash, and share. Archive inspection and safe extraction remain future enhancements.
+Long-press multi-select now exposes ZIP creation alongside bulk copy, move, trash, and share. Archives now open as folders, entries can be previewed, and extraction is guarded (see `ArchiveExtractor.kt`).
 
 ### P1 - Favorites and recent navigation are inconsistent
 
@@ -79,6 +79,8 @@ Most interactive views have visible text but no explicit content descriptions or
 The FM is optimized for direct local paths and all-files access. It does not expose Storage Access Framework providers, so cloud/document providers and user-granted directory trees are outside the current experience. This is a product limitation, not a blocker for a local companion FM.
 
 ## Implementation plan
+
+Status (2026-11-01): Phases 1 and 2 are done. Phase 3 is partly done: the `fav` and `recent` commands and the Home recent-folders list exist.
 
 ### Phase 1 - Bring Launcher to the structured contract
 

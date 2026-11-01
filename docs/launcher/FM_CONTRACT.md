@@ -39,32 +39,51 @@ search_type=<optional type>
 path=<optional search root>
 ```
 
-Supported type vocabulary includes file extensions and FM category names such as `image`, `video`, `audio`, `doc`, `apk`, `archive`, and `dir`.
+Supported type vocabulary: any extension (`pdf` or `.pdf`), plus `image`, `video`, `audio`, `doc`, `apk`, `archive`, and `dir`/`folder` (with plurals and synonyms such as `photo`, `music`, `document`).
 
-### Open a directory
+### Open a file or directory
 
 ```text
-files -open <directory>
+files -open <path>
 ```
 
 Extras:
 
 ```text
 action=open
-path=<absolute resolved directory>
+target=<path as typed>
+path=<launcher current directory>
 ```
 
-Launcher must resolve relative paths against `MainPack.currentDirectory` before sending the intent. Quoted paths with spaces must remain one path.
+FM resolves `target` against `path`. Directories open in the browser; files open with Android. Quoted paths with spaces must remain one path.
+
+### List a directory
+
+```text
+files -ls
+```
+
+Extras: `action=ls` and `path=<launcher current directory>`. FM opens that folder.
+
+### Share
+
+```text
+files -share [file]
+```
+
+Extras: `action=share`, optional `target`, and `path`. With a target, FM shares that file. Without one, FM starts a selection so the user picks what to share.
+
+### Change directory
+
+```text
+files -cd <directory>
+```
+
+Launcher-only: it updates `MainPack.currentDirectory` through the companion provider and does not start FM.
 
 ## Compatibility
 
-During migration, retain the old shorthand:
-
-```text
-files <name> [type]
-```
-
-Treat it as a legacy alias for `files -search <name> [type]`. Do not remove it until the next Launcher compatibility window. FM temporarily still accepts the old `command` extra, but new Launcher work must use structured extras.
+The `files <name> [type]` shorthand has been retired; Launcher now reports an unknown option. FM no longer reads the raw `command` extra.
 
 ## Future actions
 
@@ -74,8 +93,9 @@ Reserve the same `action` extra for future navigation-only operations such as `r
 
 1. `files` opens FM home or the current directory.
 2. `files -search invoice pdf` shows PDF matches for `invoice`.
-3. `files -open Download` resolves and opens the directory.
+3. `files -open Download` resolves and opens the directory; `files -open notes.txt` opens the file.
 4. `files -open "My Folder"` preserves spaces.
-5. Legacy `files invoice pdf` still searches during migration.
-6. Missing FM returns `Re:T-UI Files is not installed.`
-7. Theme extras continue to accompany every request.
+5. `files -ls` opens the Launcher's current directory in FM.
+6. `files -share notes.txt` shares that file; `files -share` starts a share selection.
+7. Missing FM returns `Re:T-UI Files is not installed.`
+8. Theme extras continue to accompany every request.

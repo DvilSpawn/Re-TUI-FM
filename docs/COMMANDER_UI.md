@@ -2,13 +2,15 @@
 
 The existing Re:TUI Files backend remains responsible for file operations. The UI takes its layout and menu organization from Midnight Commander's documented interface: https://github.com/MidnightCommander/mc/blob/master/doc/man/mc.1.in.
 
+Below 600 dp of screen width (phones and narrow floating windows), FM uses a compact layout instead: Home, then a single two-line file list with a tappable path bar and a bottom action bar (Browse/Places/Search/More on Home; Places/Search/Sort/New/More in folders). The action bar chips share one width and fill the bar when the window is too narrow for them. The two-pane description below applies to wider screens.
+
 - Left lists directories and their parent; saved and recent locations are available through Places. The first tap selects a directory; the next tap on the same directory opens its contents on the right. Selecting another row or using keyboard navigation changes that selection. Enter opens the current directory immediately.
 - Right uses a scrolling terminal-style file list. Tapping opens an item; long-press marks it for batch operations. Marked items have an asterisk, independently of the cursor highlight.
 - Places, File, Command, Options and Sort organize existing Android actions. Places provides common/saved folders, providers, recent folders and folder-browser navigation; Sort directly controls the right-hand listing. Unix-only MC actions are omitted.
 - File lists show name, size and modification time in separate columns, with Modified hidden when the right pane is narrower than 240 dp.
 - The numbered F1–F10 bar uses two rows of 32 dp touch buttons. Copy/move retain FM's existing mark, choose destination and confirm workflow, with Paste/Move here replacing the corresponding button while an operation is pending. Trash retains confirmation and recovery.
 - The command line opens FM's existing guarded file-command palette. The selection toolbar has a fixed clear/cancel button while the action list scrolls.
-- The default body uses the gray, gold and teal MC palette with a monospace font. Explicit Files color/font overrides, Launcher font selection, font scale and native Android text/accessibility semantics remain supported. The duplicate icon toolbar and path bar are removed; paths are in the panel headings and tapping the right-pane path opens breadcrumbs.
+- By default FM uses the Launcher colors it receives, run through a WCAG readability pass (`Readability.kt`) so text and selection stay legible. Re:TUI gray (the gray, gold and teal MC palette) and the MC skins are optional. Explicit Files color/font overrides, Launcher font selection, font scale and native Android text/accessibility semantics remain supported. The duplicate icon toolbar and path bar are removed; paths are in the panel headings and tapping the right-pane path opens breadcrumbs.
 
 ## Launcher terminal renderer
 
@@ -28,7 +30,7 @@ https://github.com/MidnightCommander/mc/tree/32e3114bfbad57794dc6752488eb02fb9b0
 
 The files in `app/src/main/assets/mc-skins` are unchanged upstream files, including their author credits. Upstream's skin-format README and GNU GPL v3 license are bundled alongside them. License text is also in `LICENSES/MidnightCommander.txt`.
 
-The picker previews a sample without changing the live file panes. Apply saves the skin ID and replaces local color overrides, while preserving navigation, marks, pending copy/move state and scroll. Cancel preserves appearance and browsing state. Individual color edits still create a custom Files palette; choosing a skin restores its original role colors. Re:TUI gray remains available as a separate palette.
+The picker previews a sample without changing the live file panes. Apply saves the skin ID and replaces local color overrides, while preserving navigation, marks, pending copy/move state and scroll. Cancel preserves appearance and browsing state. Individual color edits still create a custom Files palette; choosing a skin restores its original role colors. The picker lists Launcher colors first, then Re:TUI gray, then the MC skins.
 
 `CommanderSkin` resolves per-component section/core fallbacks, aliases, ANSI names, indexed colors, RGB cubes, gray ramps, and short/full true colors. All 41 skins and every upstream color role are covered by parser tests. FM uses the pane/frame/header, directory and common file-type, marked/markselect, selection, menu, dialog/input, command line and function-button roles. Bold, italic, underline and reverse attributes are honored. Single/double heavy frames are adapted to native rectangular touch containers; MC's widget-specific glyphs, unused editor/diff/viewer roles and blinking are retained in the source assets but do not add MC widgets to FM.
 

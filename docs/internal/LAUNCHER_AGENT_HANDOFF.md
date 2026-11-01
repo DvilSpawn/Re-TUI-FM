@@ -1,5 +1,7 @@
 # Launcher agent handoff: FM parity
 
+> Status: completed. Launcher's `files.kt` now sends structured `open`, `ls`, `search` and `share` requests, and the legacy shorthand has been retired. The current contract is [`docs/launcher/FM_CONTRACT.md`](../launcher/FM_CONTRACT.md); this note is kept for history.
+
 ## Current FM state
 
 FM now accepts:
