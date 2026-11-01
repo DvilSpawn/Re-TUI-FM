@@ -5309,8 +5309,14 @@ open class MainActivity : Activity() {
     private fun styleCommanderText(view: TextView, style: CommanderStyle, background: Boolean = false) {
         view.setTextColor(style.foreground)
         if (background) view.setBackgroundColor(style.background)
-        val fontStyle = (if ("bold" in style.attributes) Typeface.BOLD else 0) or
-            (if ("italic" in style.attributes) Typeface.ITALIC else 0)
+        val bold = "bold" in style.attributes
+        val italic = "italic" in style.attributes
+        val fontStyle = when {
+            bold && italic -> Typeface.BOLD_ITALIC
+            bold -> Typeface.BOLD
+            italic -> Typeface.ITALIC
+            else -> Typeface.NORMAL
+        }
         view.setTypeface(appTypeface ?: Typeface.MONOSPACE, fontStyle)
         view.paintFlags = if ("underline" in style.attributes) view.paintFlags or Paint.UNDERLINE_TEXT_FLAG
             else view.paintFlags and Paint.UNDERLINE_TEXT_FLAG.inv()
