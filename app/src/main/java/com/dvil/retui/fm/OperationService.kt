@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.text.format.Formatter
 import androidx.core.app.NotificationCompat
 import java.io.File
 import java.io.FileInputStream
@@ -530,7 +531,13 @@ internal class OperationService : Service() {
         completedBytes: Long = 0L,
         totalBytes: Long = 0L
     ) {
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification("$completed/$total  $current", true, id))
+        val text = if (totalBytes > 0L) {
+            "$completed/$total  $current  " +
+                "${Formatter.formatShortFileSize(this, completedBytes)} / ${Formatter.formatShortFileSize(this, totalBytes)}"
+        } else "$completed/$total  $current"
+        val percent = if (totalBytes > 0L) (completedBytes * 100 / totalBytes).toInt()
+            else if (total > 0) completed * 100 / total else null
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text, true, id, percent))
         broadcast(id, OperationState.RUNNING, completed, total, kind, current, completedBytes, totalBytes)
     }
 
@@ -556,7 +563,7 @@ internal class OperationService : Service() {
         })
     }
 
-    private fun notification(text: String, ongoing: Boolean, operationId: String): Notification {
+    private fun notification(text: String, ongoing: Boolean, operationId: String, percent: Int? = null): Notification {
         val cancel = PendingIntent.getService(
             this, operationId.hashCode(), Intent(this, OperationService::class.java).setAction(ACTION_CANCEL)
                 .putExtra(EXTRA_ID, operationId),
@@ -567,6 +574,7 @@ internal class OperationService : Service() {
             .setContentTitle(if (activeId?.let { operationId == it } == true) "Re:TUI Files operation" else "Re:TUI Files")
             .setContentText(text)
             .setOngoing(ongoing)
+            .apply { if (percent != null) setProgress(100, percent.coerceIn(0, 100), false) }
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Cancel", cancel)
             .build()
     }

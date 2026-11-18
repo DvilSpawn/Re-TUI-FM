@@ -69,7 +69,18 @@ internal object TransferEngine {
                 }
                 val temporary = temporarySibling(target)
                 try {
-                    copyRecursively(source, temporary, cancelled)
+                    val startBytes = completedBytes
+                    var copiedBytes = 0L
+                    var lastReport = System.nanoTime()
+                    copyRecursively(source, temporary, cancelled) { read ->
+                        copiedBytes += read
+                        val now = System.nanoTime()
+                        // Large items would otherwise sit at 0 B until they finish.
+                        if (now - lastReport >= PROGRESS_INTERVAL_NANOS) {
+                            lastReport = now
+                            progress(TransferProgress(source.name, completed, sources.size, startBytes + copiedBytes, totalBytes))
+                        }
+                    }
                     if (!temporary.renameTo(target)) {
                         throw IllegalStateException("${source.name}: could not publish destination")
                     }
@@ -97,11 +108,11 @@ internal object TransferEngine {
         return TransferReport(completed, skipped, failures, cancelled(), completedBytes, totalBytes)
     }
 
-    private fun copyRecursively(source: File, target: File, cancelled: () -> Boolean) {
+    private fun copyRecursively(source: File, target: File, cancelled: () -> Boolean, copied: (Int) -> Unit) {
         if (cancelled()) throw TransferCancelled()
         if (source.isDirectory) {
             if (!target.mkdirs() && !target.isDirectory) throw IllegalStateException("Could not create ${target.absolutePath}")
-            source.listFiles()?.forEach { copyRecursively(it, File(target, it.name), cancelled) }
+            source.listFiles()?.forEach { copyRecursively(it, File(target, it.name), cancelled, copied) }
             return
         }
         target.parentFile?.mkdirs()
@@ -113,6 +124,7 @@ internal object TransferEngine {
                     val read = input.read(buffer)
                     if (read < 0) break
                     output.write(buffer, 0, read)
+                    copied(read)
                 }
             }
         }
@@ -135,4 +147,6 @@ internal object TransferEngine {
     }
 
     private class TransferCancelled : Exception()
+
+    private const val PROGRESS_INTERVAL_NANOS = 250_000_000L
 }

@@ -204,7 +204,6 @@ open class MainActivity : Activity() {
     private var archiveLoadVersion = 0
     private var pendingArchiveExtraction: PendingArchiveExtraction? = null
     private var activeOperationId: String? = null
-    private var activeTransferStatus: TextView? = null
     private var activeOperationLabel = "OPERATION"
     private var operationReceiverRegistered = false
     private var activeSearchCancellation: AtomicBoolean? = null
@@ -215,6 +214,13 @@ open class MainActivity : Activity() {
     private var findVersion = 0
     private val categoryCountCache = HashMap<String, Int>()
     private val categoryCountViews = HashMap<String, TextView>()
+    private val categoryBarViews = HashMap<String, TextView>()
+    private var termTabView: TextView? = null
+    private var termPathView: TextView? = null
+    private var termCountView: TextView? = null
+    private var jobSlot: FrameLayout? = null
+    private var jobHidden = false
+    private var jobStatus = JobStatus(0, 0, "", 0L, 0L)
 
     private val operationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
@@ -237,12 +243,11 @@ open class MainActivity : Activity() {
             }
             if (eventId != activeOperationId) return
             if (state == OperationState.RUNNING.name) {
-                activeTransferStatus?.text = operationProgressText(completed, total, message, completedBytes, totalBytes)
+                updateJobProgress(completed, total, message, completedBytes, totalBytes)
                 return
             }
             activeOperationId = null
-            activeTransferStatus = null
-            paneDialog?.dismiss()
+            clearJob()
             selectedPaths.clear()
             pendingCopyPaths.clear()
             pendingMovePaths.clear()
@@ -496,8 +501,10 @@ open class MainActivity : Activity() {
             it.set(true)
             return
         }
-        activeOperationId?.let {
-            cancelOperation(it)
+        if (activeOperationId != null && !jobHidden) {
+            // Back tucks the progress panel away; Cancel on the panel stops the job.
+            jobHidden = true
+            renderJobPanel()
             return
         }
         if (setupOverlay != null) {
@@ -561,21 +568,67 @@ open class MainActivity : Activity() {
                 operationProgressText(record.completed, record.sourceCount, record.current, record.completedBytes, record.totalBytes),
                 record.id
             )
+            updateJobProgress(record.completed, record.sourceCount, record.current, record.completedBytes, record.totalBytes)
         }
         wakeOperationQueue()
     }
 
+    /** Operations dock a JOB panel above the list instead of covering it; the list stays usable. */
+    @Suppress("UNUSED_PARAMETER")
     private fun showOperationProgressDialog(title: String, statusText: String, id: String) {
-        val panel = dialogPanel("$title in progress")
-        val status = label(statusText, outputTextSizeSp, false)
-        status.setSingleLine(false)
-        status.contentDescription = "$title progress: $statusText"
-        panel.addView(status, LinearLayout.LayoutParams(-1, -2))
-        val buttons = dialogButtonRow()
-        addDialogButton(buttons, "CANCEL") { cancelOperation(id) }
-        panel.addView(buttons, LinearLayout.LayoutParams(-1, dp(48)))
-        activeTransferStatus = status
-        showDialogPanel(panel)
+        jobHidden = false
+        jobStatus = JobStatus(0, 0, "", 0L, 0L)
+        renderJobPanel()
+    }
+
+    private fun updateJobProgress(completed: Int, total: Int, message: String, completedBytes: Long, totalBytes: Long) {
+        jobStatus = JobStatus(completed, total, message, completedBytes, totalBytes)
+        renderJobPanel()
+    }
+
+    private fun clearJob() {
+        jobHidden = false
+        renderJobPanel()
+    }
+
+    private fun renderJobPanel() {
+        val slot = jobSlot ?: return
+        slot.removeAllViews()
+        val id = activeOperationId
+        if (id == null || jobHidden) {
+            slot.visibility = View.GONE
+            return
+        }
+        val status = jobStatus
+        val fraction = when {
+            status.totalBytes > 0L -> status.completedBytes.toDouble() / status.totalBytes
+            status.total > 0 -> status.completed.toDouble() / status.total
+            else -> 0.0
+        }.coerceIn(0.0, 1.0)
+        val percent = (fraction * 100).roundToInt()
+        val panel = termPanel("JOB", "${activeOperationLabel.lowercase(Locale.US)}  ${status.completed}/${status.total}", "$percent%")
+        val cells = if (compactLayout()) 28 else 40
+        panel.body.addView(termText(termMeter((fraction * 1000).toLong(), 1000L, cells)), LinearLayout.LayoutParams(-1, dp(22)))
+        val detail = LinearLayout(this)
+        detail.orientation = LinearLayout.HORIZONTAL
+        val bytes = if (status.totalBytes > 0L) "${humanSize(status.completedBytes)} / ${humanSize(status.totalBytes)}" else "${status.completed} of ${status.total}"
+        detail.addView(termText(bytes), LinearLayout.LayoutParams(-2, -1))
+        detail.addView(termText(status.message, dim = true).apply {
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            setPadding(dp(10), 0, 0, 0)
+            ellipsize = TextUtils.TruncateAt.MIDDLE
+        }, LinearLayout.LayoutParams(0, -1, 1f))
+        panel.body.addView(detail, LinearLayout.LayoutParams(-1, dp(22)))
+        val buttons = LinearLayout(this)
+        buttons.orientation = LinearLayout.HORIZONTAL
+        val cancel = termOutlineButton("Cancel").apply { contentDescription = "Cancel ${activeOperationLabel.lowercase(Locale.US)}"; setOnClickListener { cancelOperation(id) } }
+        val hide = termOutlineButton("Hide").apply { contentDescription = "Hide progress; it keeps running"; setOnClickListener { jobHidden = true; renderJobPanel() } }
+        buttons.addView(cancel, LinearLayout.LayoutParams(0, dp(28), 1f).apply { rightMargin = dp(6) })
+        buttons.addView(hide, LinearLayout.LayoutParams(0, dp(28), 1f))
+        panel.body.addView(buttons, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        panel.root.contentDescription = "${activeOperationLabel.lowercase(Locale.US)} $percent percent, $bytes"
+        slot.addView(panel.root, FrameLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+        slot.visibility = View.VISIBLE
     }
 
     private fun operationLabel(kind: String, move: Boolean = false): String = when (kind) {
@@ -587,10 +640,21 @@ open class MainActivity : Activity() {
         else -> if (move) "MOVE" else "COPY"
     }
 
+    /** Android 13+ hides the operation progress notification until notifications are allowed; ask once. */
+    private fun requestNotificationPermissionOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        val prefs = themePrefs()
+        if (prefs.getBoolean("notifications_requested", false)) return
+        prefs.edit().putBoolean("notifications_requested", true).apply()
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 8)
+    }
+
     private fun wakeOperationQueue() {
         if (OperationStore.nextQueued(this) == null) return
         val intent = Intent(this, OperationService::class.java).setAction(OperationService.ACTION_WAKE)
         runCatching {
+            requestNotificationPermissionOnce()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ContextCompat.startForegroundService(this, intent)
             else startService(intent)
         }
@@ -673,7 +737,7 @@ open class MainActivity : Activity() {
         selectionScrollView = selectionScroll
         val selection = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(headerPanelColor)
+            setBackgroundColor(if (compactLayout()) termPaper() else headerPanelColor)
             addView(selectionScroll, LinearLayout.LayoutParams(0, -1, 1f))
         }
         val close = label("X", outputTextSizeSp, true).apply {
@@ -694,12 +758,17 @@ open class MainActivity : Activity() {
         selectionSurface = selection
         selection.visibility = selectionBar?.visibility ?: View.GONE
         workspace.addView(selection, FrameLayout.LayoutParams(-1, dp(32), Gravity.TOP))
+        val job = FrameLayout(this)
+        jobSlot = job
+        job.visibility = View.GONE
+        main.addView(job, LinearLayout.LayoutParams(-1, -2))
         val workspaceParams = LinearLayout.LayoutParams(-1, 0, 1f)
         workspaceParams.topMargin = dp(1)
         main.addView(workspace, workspaceParams)
         main.addView(buildCommandLine(), LinearLayout.LayoutParams(-1, dp(32)))
         main.addView(buildFunctionBar(), LinearLayout.LayoutParams(-1, dp(64)))
         applyLayoutMode()
+        renderJobPanel()
         return root
     }
 
@@ -725,7 +794,7 @@ open class MainActivity : Activity() {
         row.orientation = LinearLayout.HORIZONTAL
         row.gravity = Gravity.CENTER_VERTICAL
         row.setPadding(dp(6), 0, 0, 0)
-        row.background = toolbarDrawable()
+        row.background = if (compactLayout()) ColorDrawable(termPaper()) else toolbarDrawable()
         row.visibility = if (shareSelectionMode || activeArchive != null || pendingArchiveExtraction != null || selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty() || pendingMovePaths.isNotEmpty()) View.VISIBLE else View.GONE
         updateSelectionBar()
         return row
@@ -734,6 +803,7 @@ open class MainActivity : Activity() {
     private fun updateSelectionBar() {
         val row = selectionBar ?: return
         updateFunctionBar()
+        updateTermFooter()
         row.removeAllViews()
         val hasWork = activeSearchCancellation != null || shareSelectionMode || activeArchive != null || pendingArchiveExtraction != null || selectedPaths.isNotEmpty() || pendingCopyPaths.isNotEmpty() || pendingMovePaths.isNotEmpty()
         row.visibility = if (hasWork && currentScreen == Screen.TREE) View.VISIBLE else View.GONE
@@ -808,6 +878,14 @@ open class MainActivity : Activity() {
     private fun selectionCountWidthDp(): Int = if (compactLayout()) 84 else 120
 
     private fun addSelectionAction(parent: LinearLayout, text: String, action: () -> Unit) {
+        if (compactLayout()) {
+            // The first child is the count label, so keys number from 1.
+            val key = termFunctionKey(parent.childCount, text.lowercase(Locale.US).replaceFirstChar { it.uppercase() }, fill = false)
+            key.contentDescription = text.lowercase(Locale.US)
+            key.setOnClickListener { action() }
+            parent.addView(key, LinearLayout.LayoutParams(-2, dp(28)).apply { leftMargin = dp(8) })
+            return
+        }
         val button = label(text, max(9, outputTextSizeSp - 3), true)
         button.gravity = Gravity.CENTER
         button.setTextColor(moduleButtonTextColor)
@@ -1009,14 +1087,21 @@ open class MainActivity : Activity() {
         val command = label("", max(11, outputTextSizeSp), false)
         command.id = R.id.fm_command_button
         command.gravity = Gravity.CENTER_VERTICAL
-        command.setPadding(dp(8), 0, dp(8), 0)
+        command.setPadding(dp(10), 0, dp(8), 0)
         command.setTextColor(inputTextColor)
         command.setBackgroundColor(outputPanelColor)
         commanderSkin?.style("core", "commandline")?.displayed?.let { styleCommanderText(command, it, background = true) }
         command.contentDescription = "Open file command palette"
         command.setOnClickListener { promptCommand() }
         commandLineView = command
-        return command
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        val inset = max(1, dp(1))
+        row.background = GradientDrawable().apply { setColor(termPaper()); setStroke(inset, termLine()) }
+        row.setPadding(inset, inset, inset, inset)
+        row.addView(termInverted("$").apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }, LinearLayout.LayoutParams(dp(30), -1))
+        row.addView(command, LinearLayout.LayoutParams(0, -1, 1f))
+        return row
     }
 
     private fun buildFunctionBar(): View {
@@ -1066,12 +1151,14 @@ open class MainActivity : Activity() {
     private fun buildActionBar(bar: LinearLayout) {
         actionBarScreen = currentScreen
         bar.layoutParams?.let { it.height = dp(40); bar.layoutParams = it }
-        bar.setBackgroundColor(outputPanelColor or 0xff000000.toInt())
+        bar.setBackgroundColor(termPaper())
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
         row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(2), 0, dp(2), 0)
+        val home = currentScreen == Screen.HOME
         val lastFolder = NavigationStateStore.last(themePrefs()) ?: homeDirectory()
-        val actions = if (currentScreen == Screen.HOME) listOf(
+        val actions = if (home) listOf(
             Triple("Browse", "Browse ${lastFolder.name.ifBlank { "storage" }}") { navigateMain(lastFolder) },
             Triple("Places", "Places and bookmarks") { showPlacesMenu() },
             Triple("Search", "Search all files") { promptSearch(null, "Search all storage") },
@@ -1088,54 +1175,42 @@ open class MainActivity : Activity() {
             },
             Triple("More", "More menus") { showMoreMenu() }
         )
-        for ((text, description, action) in actions) {
-            val button = label(text, outputTextSizeSp, true)
-            button.id = View.generateViewId()
-            button.gravity = Gravity.CENTER
-            button.setTextColor(moduleButtonTextColor)
-            button.setBackgroundColor(moduleButtonBgColor)
-            commanderSkin?.style("buttonbar", "button")?.displayed?.let { styleCommanderText(button, it, background = true) }
-            // Compact chips sized to their label; the full bar height stays tappable.
-            val fill = (button.background as? ColorDrawable)?.color ?: moduleButtonBgColor
-            button.background = android.graphics.drawable.InsetDrawable(ColorDrawable(fill), 0, dp(6), 0, dp(6))
-            button.setPadding(dp(8), 0, dp(8), 0)
+        actions.forEachIndexed { index, (text, description, action) ->
+            // Home keeps outlined buttons; inside folders the bar reads as MC function keys.
+            val button = if (home) termOutlineButton(text) else termFunctionKey(index + 1, text)
             button.contentDescription = description
             button.setOnClickListener { action() }
-            if (row.childCount > 0) row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-            row.addView(button, LinearLayout.LayoutParams(-2, -1))
-        }
-        // Every chip takes the widest label's width so the bar reads as one even set.
-        val chips = (0 until row.childCount).map(row::getChildAt).filterIsInstance<TextView>()
-        // The terminal renderer floors the width to whole character cells, so leave one spare cell or labels wrap.
-        val chipWidth = chips.maxOfOrNull {
-            kotlin.math.ceil(it.paint.measureText(it.text.toString() + " ")).toInt() + it.paddingLeft + it.paddingRight
-        } ?: 0
-        chips.forEach { it.layoutParams = LinearLayout.LayoutParams(chipWidth, -1) }
-        row.setPadding(dp(6), 0, dp(6), 0)
-        // Narrow floating windows: chips share the full width (spacers collapse); wide again restores compact chips.
-        fun applyChipMode(fit: Boolean) {
-            for (index in 0 until row.childCount) {
-                val child = row.getChildAt(index)
-                if (child is TextView) {
-                    child.setPadding(dp(if (fit) 8 else 2), 0, dp(if (fit) 8 else 2), 0)
-                    child.layoutParams = if (fit) LinearLayout.LayoutParams(chipWidth, -1)
-                        else LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(2), 0, dp(2), 0) }
-                } else {
-                    child.layoutParams = LinearLayout.LayoutParams(0, 1, if (fit) 1f else 0f)
-                }
-            }
-        }
-        row.tag = true
-        row.addOnLayoutChangeListener { view, left, _, right, _, _, _, _, _ ->
-            val width = right - left
-            if (width <= 0) return@addOnLayoutChangeListener
-            val fit = width >= chips.size * chipWidth + view.paddingLeft + view.paddingRight
-            if (view.tag != fit) {
-                view.tag = fit
-                view.post { applyChipMode(fit) }
-            }
+            row.addView(button, LinearLayout.LayoutParams(0, dp(28), 1f).apply { setMargins(dp(3), 0, dp(3), 0) })
         }
         bar.addView(row, LinearLayout.LayoutParams(-1, -1))
+    }
+
+    private fun termOutlineButton(text: String): View = termText(text).apply {
+        gravity = Gravity.CENTER
+        val fill = android.graphics.drawable.StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), GradientDrawable().apply { setColor(withAlpha(termInk(), 60)); setStroke(max(1, dp(1)), termLine()) })
+            addState(intArrayOf(), GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(max(1, dp(1)), termLine()) })
+        }
+        background = fill
+        isClickable = true
+        isFocusable = true
+    }
+
+    /** "1Open": the number in ink, the label as an inverted block, like MC's function key bar. */
+    private fun termFunctionKey(number: Int, text: String, fill: Boolean = true): View {
+        val key = LinearLayout(this)
+        key.orientation = LinearLayout.HORIZONTAL
+        key.isClickable = true
+        key.isFocusable = true
+        key.addView(termText("$number").apply { gravity = Gravity.CENTER; setPadding(0, 0, dp(2), 0) }, LinearLayout.LayoutParams(-2, -1))
+        val labelView = termInverted(text).apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL; setPadding(dp(4), 0, dp(4), 0) }
+        labelView.background = android.graphics.drawable.StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), ColorDrawable(withAlpha(termInk(), 170)))
+            addState(intArrayOf(), ColorDrawable(termInk()))
+        }
+        labelView.isDuplicateParentStateEnabled = true
+        key.addView(labelView, if (fill) LinearLayout.LayoutParams(0, -1, 1f) else LinearLayout.LayoutParams(-2, -1))
+        return key
     }
 
     private fun showMoreMenu() {
@@ -1204,10 +1279,14 @@ open class MainActivity : Activity() {
         title.setOnClickListener { if (panel == Panel.LEFT) showFolderBrowserMenu() else showBreadcrumbMenu() }
         val compact = panel == Panel.RIGHT && compactLayout()
         if (compact) {
-            pane.addView(buildBreadcrumbBar(), LinearLayout.LayoutParams(-1, dp(48)))
+            val inset = max(1, dp(1))
+            pane.background = termPanelDrawable()
+            pane.setPadding(inset, inset, inset, dp(4))
+            pane.addView(buildTermDirHeader(), LinearLayout.LayoutParams(-1, dp(26)))
+            pane.addView(termDivider(), LinearLayout.LayoutParams(-1, inset))
+            pane.addView(buildTermColumnHeader(), LinearLayout.LayoutParams(-1, dp(22)).apply { setMargins(dp(6), dp(4), dp(6), dp(2)) })
             rightTitleView = null
-            rightNameSortView = null
-            rightModifiedSortView = null
+            breadcrumbRow = null
         } else {
             pane.addView(title, LinearLayout.LayoutParams(-1, dp(32)))
             if (panel == Panel.LEFT) leftTitleView = title else rightTitleView = title
@@ -1275,16 +1354,29 @@ open class MainActivity : Activity() {
             }
         }
 
-        val footer = label("", max(10, outputTextSizeSp - 2), true)
-        footer.gravity = Gravity.START or Gravity.CENTER_VERTICAL
-        footer.setPadding(dp(4), 0, dp(4), 0)
-        footer.ellipsize = TextUtils.TruncateAt.END
-        footer.background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(max(1, dp(1)), outputBorderColor) }
-        // Compact rows already show full names, so the selected-name footer is redundant there.
-        if (!compact) pane.addView(footer, LinearLayout.LayoutParams(-1, dp(20)))
-        val disk = label("", max(10, outputTextSizeSp - 2), true)
-        disk.gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        pane.addView(disk, LinearLayout.LayoutParams(-1, dp(20)))
+        val footer: TextView
+        val disk: TextView
+        if (compact) {
+            // Phone footer: marked or folder summary on the left, free space on the right.
+            pane.addView(termDivider(), LinearLayout.LayoutParams(-1, max(1, dp(1))).apply { setMargins(dp(6), dp(2), dp(6), 0) })
+            footer = termText("", dim = true).apply { setPadding(dp(8), 0, dp(4), 0) }
+            disk = termText("", dim = true).apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL; setPadding(dp(4), 0, dp(14), 0) }
+            val row = LinearLayout(this)
+            row.orientation = LinearLayout.HORIZONTAL
+            row.addView(footer, LinearLayout.LayoutParams(0, -1, 1f))
+            row.addView(disk, LinearLayout.LayoutParams(-2, -1))
+            pane.addView(row, LinearLayout.LayoutParams(-1, dp(22)))
+        } else {
+            footer = label("", max(10, outputTextSizeSp - 2), true)
+            footer.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            footer.setPadding(dp(4), 0, dp(4), 0)
+            footer.ellipsize = TextUtils.TruncateAt.END
+            footer.background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(max(1, dp(1)), outputBorderColor) }
+            pane.addView(footer, LinearLayout.LayoutParams(-1, dp(20)))
+            disk = label("", max(10, outputTextSizeSp - 2), true)
+            disk.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            pane.addView(disk, LinearLayout.LayoutParams(-1, dp(20)))
+        }
 
         if (panel == Panel.LEFT) {
             leftFooterView = footer
@@ -1294,6 +1386,97 @@ open class MainActivity : Activity() {
             rightDiskView = disk
         }
         return pane
+    }
+
+    private fun buildTermDirHeader(): View {
+        val head = LinearLayout(this)
+        head.orientation = LinearLayout.HORIZONTAL
+        val tab = termInverted("‹ DIR ")
+        tab.contentDescription = "Up one folder"
+        tab.setOnClickListener { goParent() }
+        head.addView(tab, LinearLayout.LayoutParams(-2, -1))
+        val path = termText("").apply { setPadding(dp(8), 0, dp(6), 0) }
+        path.contentDescription = "Path and breadcrumbs"
+        path.setOnClickListener { showBreadcrumbMenu() }
+        head.addView(path, LinearLayout.LayoutParams(0, -1, 1f))
+        val count = termText("", dim = true).apply { setPadding(dp(6), 0, dp(10), 0) }
+        head.addView(count, LinearLayout.LayoutParams(-2, -1))
+        termTabView = tab
+        termPathView = path
+        termCountView = count
+        return head
+    }
+
+    private fun buildTermColumnHeader(): View {
+        val bar = LinearLayout(this)
+        bar.orientation = LinearLayout.HORIZONTAL
+        bar.setBackgroundColor(termInk())
+        fun cell(text: String, gravity: Int) = termText(text).apply {
+            setTextColor(termPaper())
+            this.gravity = gravity or Gravity.CENTER_VERTICAL
+            setPadding(dp(4), 0, dp(4), 0)
+        }
+        val name = cell("Name", Gravity.START)
+        name.contentDescription = "Sort by name"
+        name.setOnClickListener {
+            rightSortMode = if (rightSortMode == SortMode.NAME_ASC) SortMode.NAME_DESC else SortMode.NAME_ASC
+            sortRightPane()
+        }
+        bar.addView(cell(".n", Gravity.START), LinearLayout.LayoutParams(dp(TERM_MARK_DP + 8), -1))
+        bar.addView(View(this), LinearLayout.LayoutParams(dp(TERM_ICON_DP), -1))
+        bar.addView(name, LinearLayout.LayoutParams(0, -1, 1f))
+        val size = cell("Size", Gravity.END)
+        size.contentDescription = "Sort order"
+        size.setOnClickListener { showSortMenu() }
+        bar.addView(size, LinearLayout.LayoutParams(dp(TERM_SIZE_DP), -1))
+        val date = cell("Modified", Gravity.END)
+        date.contentDescription = "Sort by modified date"
+        date.setOnClickListener {
+            rightSortMode = if (rightSortMode == SortMode.MODIFIED_NEWEST) SortMode.MODIFIED_OLDEST else SortMode.MODIFIED_NEWEST
+            sortRightPane()
+        }
+        bar.addView(date, LinearLayout.LayoutParams(dp(TERM_DATE_DP), -1))
+        rightNameSortView = name
+        rightModifiedSortView = date
+        updateSortButtons()
+        return bar
+    }
+
+    /** Tab, path and count above the phone file list. */
+    private fun updateTermHeader() {
+        val tab = termTabView ?: return
+        val virtual = rightVirtualTitle
+        val archive = activeArchive
+        val provider = activeProvider
+        val kind = when {
+            archive != null -> "ZIP"
+            provider != null -> "SAF"
+            virtual == "TRASH" -> "TRASH"
+            virtual != null -> "LIST"
+            else -> "DIR"
+        }
+        tab.text = "‹ $kind "
+        termPathView?.text = when {
+            archive != null -> archive.name + if (archiveDirectory.isEmpty()) "" else "/$archiveDirectory"
+            provider != null -> provider.displayName
+            virtual != null -> virtual.lowercase(Locale.US)
+            else -> tildePath(rightPane.directory).let { if (it.length > 34) "…" + it.takeLast(33) else it }
+        }
+        termCountView?.text = rightPane.rows.count { !it.isParent && !it.isSection && (it.file != null || it.archivePath != null || it.providerItem != null) }.toString()
+    }
+
+    private fun updateTermFooter() {
+        if (!compactLayout() || currentScreen != Screen.TREE) return
+        val footer = rightFooterView ?: return
+        footer.text = if (selectedPaths.isNotEmpty()) {
+            val size = selectedPaths.sumOf { File(it).takeIf(File::isFile)?.length() ?: 0L }
+            "*${selectedPaths.size}  ${humanSize(size)}"
+        } else {
+            val entries = rightPane.rows.filter { !it.isParent && !it.isSection && (it.file != null || it.archivePath != null || it.providerItem != null) }
+            val dirs = entries.count { it.isDirectory }
+            "$dirs dirs  ${entries.size - dirs} files"
+        }
+        rightDiskView?.text = if (activeArchive == null && activeProvider == null) "${humanSize(rightPane.directory.freeSpace)} free" else ""
     }
 
     private fun breadcrumbTextColor(): Int =
@@ -1429,14 +1612,23 @@ open class MainActivity : Activity() {
     }
 
     private fun updateSortButtons() {
+        // Faded labels vanish on the inverted header bar, so the active column is marked by its arrow alone.
         rightNameSortView?.apply {
-            alpha = if (rightSortMode == SortMode.NAME_ASC || rightSortMode == SortMode.NAME_DESC) 1f else 0.5f
-            text = if (rightSortMode == SortMode.NAME_DESC) "Name ↓" else "Name ↑"
+            alpha = 1f
+            text = when (rightSortMode) {
+                SortMode.NAME_ASC -> "Name ↑"
+                SortMode.NAME_DESC -> "Name ↓"
+                else -> "Name"
+            }
             contentDescription = if (rightSortMode == SortMode.NAME_DESC) "Name descending" else "Name ascending"
         }
         rightModifiedSortView?.apply {
-            alpha = if (rightSortMode == SortMode.MODIFIED_NEWEST || rightSortMode == SortMode.MODIFIED_OLDEST) 1f else 0.5f
-            text = "Modified"
+            alpha = 1f
+            text = when (rightSortMode) {
+                SortMode.MODIFIED_NEWEST -> "Date ↓"
+                SortMode.MODIFIED_OLDEST -> "Date ↑"
+                else -> "Date"
+            }
             contentDescription = if (rightSortMode == SortMode.MODIFIED_OLDEST) "Oldest modified first" else "Recently modified first"
         }
     }
@@ -1518,9 +1710,9 @@ open class MainActivity : Activity() {
         }
     }
 
+    // A bare path (plain `files` from Launcher) only sets where Browse starts; the window still opens on Home.
     private fun shouldOpenTree(intent: Intent?): Boolean {
         return !intent?.getStringExtra(EXTRA_ACTION).isNullOrBlank() ||
-            !intent?.getStringExtra(EXTRA_PATH).isNullOrBlank() ||
             searchRequestExtra(intent) != null
     }
 
@@ -1557,134 +1749,329 @@ open class MainActivity : Activity() {
         navigateMainInTree(dir)
     }
 
+    // ---- TERM panels: Files borrows the Launcher home's titled panels, drawn in one ink on the panel colour ----
+
+    private class TermPanel(val root: LinearLayout, val body: LinearLayout, val tab: TextView, val sub: TextView, val meta: TextView)
+
+    private fun termInk(): Int = outputTextColor or 0xff000000.toInt()
+    private fun termPaper(): Int = outputPanelColor or 0xff000000.toInt()
+    private fun termDim(): Int = withAlpha(termInk(), 150)
+    private fun termLine(): Int = outputBorderColor
+
+    private fun termPanelDrawable(): Drawable =
+        TermPanelDrawable(termPaper(), termLine(), max(1f, dpFloat(1f)), dpFloat(10f))
+
+    private fun termPressable(): Drawable = android.graphics.drawable.StateListDrawable().apply {
+        addState(intArrayOf(android.R.attr.state_pressed), ColorDrawable(withAlpha(termInk(), 60)))
+        addState(intArrayOf(), ColorDrawable(Color.TRANSPARENT))
+    }
+
+    private fun termText(text: String, dim: Boolean = false, sizeSp: Int = outputTextSizeSp): TextView =
+        label(text, sizeSp, false).apply {
+            gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            setTextColor(if (dim) termDim() else termInk())
+            ellipsize = TextUtils.TruncateAt.END
+        }
+
+    private fun termInverted(text: String): TextView = termText(text).apply {
+        gravity = Gravity.CENTER
+        setTextColor(termPaper())
+        setBackgroundColor(termInk())
+        // The terminal renderer floors widths to whole cells; the extra right padding keeps the last letter.
+        setPadding(dp(8), 0, dp(12), 0)
+    }
+
+    private fun termDivider(): View = View(this).apply { setBackgroundColor(termLine()) }
+
+    private fun termPanel(tab: String, sub: String = "", meta: String = ""): TermPanel {
+        val root = LinearLayout(this)
+        root.orientation = LinearLayout.VERTICAL
+        root.background = termPanelDrawable()
+        val inset = max(1, dp(1))
+        root.setPadding(inset, inset, inset, dp(6))
+        val head = LinearLayout(this)
+        head.orientation = LinearLayout.HORIZONTAL
+        val tabView = termInverted(tab)
+        head.addView(tabView, LinearLayout.LayoutParams(-2, -1))
+        val subView = termText(sub).apply { setPadding(dp(8), 0, dp(6), 0) }
+        head.addView(subView, LinearLayout.LayoutParams(0, -1, 1f))
+        val metaView = termText(meta, dim = true).apply { setPadding(dp(6), 0, dp(10), 0) }
+        head.addView(metaView, LinearLayout.LayoutParams(-2, -1))
+        root.addView(head, LinearLayout.LayoutParams(-1, dp(24)))
+        root.addView(termDivider(), LinearLayout.LayoutParams(-1, inset))
+        val body = LinearLayout(this)
+        body.orientation = LinearLayout.VERTICAL
+        body.setPadding(dp(8), dp(4), dp(8), 0)
+        root.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+        return TermPanel(root, body, tabView, subView, metaView)
+    }
+
+    /** A panel row of fixed-width columns; a 0 width takes the remaining space. */
+    private fun termRow(cells: List<Pair<TextView, Int>>, heightDp: Int = 26, action: (() -> Unit)? = null): LinearLayout {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        for ((view, widthDp) in cells) {
+            row.addView(view, if (widthDp == 0) LinearLayout.LayoutParams(0, -1, 1f) else LinearLayout.LayoutParams(dp(widthDp), -1))
+        }
+        row.layoutParams = LinearLayout.LayoutParams(-1, dp(heightDp))
+        action?.let { run ->
+            row.background = termPressable()
+            row.setOnClickListener { run() }
+        }
+        return row
+    }
+
+    private fun termMeter(value: Long, total: Long, cells: Int): String {
+        val filled = if (total <= 0) 0 else ((value.toDouble() / total) * cells).roundToInt().coerceIn(0, cells)
+        return "[" + "█".repeat(filled) + "░".repeat(cells - filled) + "]"
+    }
+
+    private fun shortDate(millis: Long): String =
+        if (millis <= 0) "" else java.text.SimpleDateFormat("MMM dd", Locale.getDefault()).format(java.util.Date(millis))
+
+    private fun compactCount(count: Int): String =
+        if (count >= 1000) String.format(Locale.US, "%.1fk", count / 1000.0) else count.toString()
+
+    private fun tildePath(file: File): String {
+        val home = homeDirectory().absolutePath
+        val path = file.absolutePath
+        return when {
+            path == home -> "~"
+            path.startsWith("$home/") -> "~" + path.removePrefix(home)
+            else -> path
+        }
+    }
+
+    /** A small Nerd Font icon so rows can be scanned by shape before they are read. */
+    private fun termGlyph(glyph: String, dim: Boolean = false): TextView =
+        glyphView(glyph, if (dim) termDim() else termInk(), max(12, outputTextSizeSp + 1))
+
+    private fun nameGlyph(name: String, directory: Boolean = false): String {
+        if (directory) return "\uF07B"
+        val ext = name.substringAfterLast('.', "").lowercase(Locale.US)
+        return when {
+            ext in setOf("jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "svg", "avif", "dng", "raw") -> "\uF03E"
+            ext in setOf("mp4", "mkv", "webm", "mov", "avi", "3gp", "m4v", "ts") -> "\uF008"
+            ext in setOf("mp3", "flac", "ogg", "opus", "wav", "m4a", "aac", "amr", "mid") -> "\uF001"
+            ext == "apk" || ext == "apks" || ext == "xapk" -> "\uE70E"
+            ext in setOf("zip", "7z", "rar", "tar", "gz", "tgz", "xz", "bz2", "zst", "jar", "mcpack", "mcaddon") -> "\uF410"
+            ext == "pdf" -> "\uF1C1"
+            ext in setOf("txt", "md", "log", "csv", "doc", "docx", "odt", "rtf", "epub", "xls", "xlsx", "ppt", "pptx") -> "\uF0F6"
+            ext in setOf("kt", "java", "py", "js", "ts", "json", "xml", "html", "css", "sh", "c", "cpp", "h", "rs", "go", "yml", "yaml", "toml", "lua") -> "\uF121"
+            else -> "\uF15B"
+        }
+    }
+
+    private fun entryGlyph(entry: FileEntry): String = when {
+        entry.isParent -> "\uF062"
+        else -> nameGlyph(entry.label, entry.isDirectory)
+    }
+
+    private fun placeGlyph(label: String, trash: Boolean, provider: Boolean): String {
+        if (trash) return "\uF1F8"
+        if (provider) return "\uF0C2"
+        return when (label.lowercase(Locale.US)) {
+            "home" -> "\uF015"
+            "downloads", "download" -> "\uF019"
+            "documents" -> "\uF0F6"
+            "pictures", "dcim", "camera", "screenshots" -> "\uF03E"
+            "music" -> "\uF001"
+            "movies", "videos" -> "\uF008"
+            else -> "\uF07B"
+        }
+    }
+
+    private fun categoryTag(category: FileCategory): String = when (category.label) {
+        "Images" -> "IMG"
+        "Videos" -> "VID"
+        "Audio" -> "AUD"
+        "Documents" -> "DOC"
+        "APKs" -> "APK"
+        "Archives" -> "ZIP"
+        else -> category.label.take(3).uppercase(Locale.US)
+    }
+
     private fun buildHomePage(): View {
         val scroll = ScrollView(this)
         scroll.isFillViewport = true
         val content = LinearLayout(this)
         content.orientation = LinearLayout.VERTICAL
-        content.setPadding(0, 0, 0, dp(8))
+        content.setPadding(dp(4), dp(6), dp(4), dp(8))
         scroll.addView(content, FrameLayout.LayoutParams(-1, -2))
         if (!hasStorageAccess()) {
-            val access = homePanel("STORAGE ACCESS")
-            addHomeRow(access, "Not granted", "Tap to grant access", "\uF023") { ensureStorageAccess(userInitiated = true) }
-            content.addView(access, sectionParams())
+            val access = termPanel("ACCESS", "storage not granted")
+            access.body.addView(termRow(listOf(termText("Tap to grant access") to 0)) { ensureStorageAccess(userInitiated = true) })
+            content.addView(access.root, sectionParams())
         }
-        content.addView(buildHomeSearchRow(), LinearLayout.LayoutParams(-1, dp(48)).apply { setMargins(dp(4), dp(4), dp(4), dp(2)) })
-        content.addView(buildCategorySection(), sectionParams())
         buildRecentSection()?.let { content.addView(it, sectionParams()) }
-        content.addView(buildStorageSection(), sectionParams())
+        val split = LinearLayout(this)
+        split.orientation = LinearLayout.HORIZONTAL
+        split.isBaselineAligned = false
+        split.addView(buildCategorySection(), LinearLayout.LayoutParams(0, -1, 1f).apply { rightMargin = dp(4) })
+        split.addView(buildStorageSection(), LinearLayout.LayoutParams(0, -1, 1f).apply { leftMargin = dp(4) })
+        content.addView(split, sectionParams())
+        content.addView(buildPlacesSection(), sectionParams())
+        // The newest files take whatever height is left, so the page ends on content, not blank paper.
+        content.addView(buildNewestSection(), LinearLayout.LayoutParams(-1, -2, 1f))
         return scroll
     }
 
-    private fun buildHomeSearchRow(): View {
-        val search = label("$ find  Search all files…", outputTextSizeSp, false)
-        search.gravity = Gravity.CENTER_VERTICAL
-        search.setPadding(dp(12), 0, dp(12), 0)
-        search.setTextColor(withAlpha(inputTextColor, 200))
-        search.background = panelDrawable(PanelRole.OUTPUT)
-        search.contentDescription = "Search all files"
-        search.setOnClickListener { promptSearch(null, "Search all storage") }
-        return search
-    }
-
     private fun buildRecentSection(): View? {
-        val recent = NavigationStateStore.recent(themePrefs()).take(4)
+        val recent = NavigationStateStore.recent(themePrefs()).take(6)
         if (recent.isEmpty()) return null
-        val panel = homePanel("RECENT FOLDERS")
-        for (folder in recent) {
-            val name = if (folder == homeDirectory()) "Phone storage" else folder.name.ifBlank { folder.absolutePath }
-            addHomeRow(panel, name, abbreviatePath(folder.absolutePath), "\uF07B") { navigateMain(folder) }
+        val panel = termPanel("RECENT", "0:${recent.size}", "tap to open")
+        fun right(view: TextView) = view.apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
+        panel.body.addView(termRow(listOf(
+            termText(".n", dim = true) to 26, termText("") to 22, termText("Name", dim = true) to 0,
+            right(termText("Items", dim = true)) to 52, right(termText("Modified", dim = true)) to 72
+        ), heightDp = 22))
+        recent.forEachIndexed { index, folder ->
+            val name = if (folder == homeDirectory()) "~ (phone)" else folder.name.ifBlank { folder.absolutePath }
+            val count = folder.list()?.count { showHidden || !it.startsWith(".") }
+            val row = termRow(listOf(
+                termText("${index + 1}") to 26, termGlyph("\uF07B") to 22, termText(name) to 0,
+                right(termText(count?.let(::compactCount) ?: "-")) to 52,
+                right(termText(shortDate(folder.lastModified()))) to 72
+            )) { navigateMain(folder) }
+            row.contentDescription = "Open ${tildePath(folder)}"
+            panel.body.addView(row)
         }
-        return panel
+        return panel.root
     }
 
     private fun buildCategorySection(): View {
-        val panel = homePanel("CATEGORIES")
+        val panel = termPanel("TYPES")
         categoryCountViews.clear()
-        var row: LinearLayout? = null
-        for ((index, category) in fileCategories.withIndex()) {
-            if (index % 3 == 0) {
-                row = LinearLayout(this)
-                row.orientation = LinearLayout.HORIZONTAL
-                panel.addView(row, LinearLayout.LayoutParams(-1, dp(92)))
+        categoryBarViews.clear()
+        for (category in fileCategories) {
+            val bar = termText("", dim = true)
+            val count = termText(categoryCountCache[category.label]?.let(::compactCount) ?: "…").apply {
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
             }
-            addCategoryTile(row, category, categoryCountCache[category.label])
+            categoryBarViews[category.label] = bar
+            categoryCountViews[category.label] = count
+            val row = termRow(listOf(termGlyph(category.glyph) to 22, termText(categoryTag(category)) to 36, bar to 0, count to 44)) { showCategoryFiles(category) }
+            row.contentDescription = category.label
+            panel.body.addView(row)
         }
+        updateCategoryBars()
         loadCategoryCountsAsync()
-        return panel
+        return panel.root
+    }
+
+    private fun updateCategoryBars() {
+        val most = categoryCountCache.values.maxOrNull()?.takeIf { it > 0 } ?: return
+        for ((label, view) in categoryBarViews) {
+            val count = categoryCountCache[label] ?: continue
+            // Square-root scale keeps small categories visible next to thousands of photos.
+            view.text = if (count == 0) "" else "█".repeat(max(1, (kotlin.math.sqrt(count.toDouble() / most) * 6).roundToInt()))
+        }
     }
 
     private fun buildStorageSection(): View {
-        val panel = homePanel("STORAGE")
+        val panel = termPanel("DISK")
         for (root in storageRoots()) {
-            addHomeRow(panel, storageRootLabel(root), storageLine(root), "") { navigateMain(root) }
+            val total = root.totalSpace
+            val used = total - root.freeSpace
+            val block = LinearLayout(this)
+            block.orientation = LinearLayout.VERTICAL
+            block.background = termPressable()
+            block.contentDescription = "${storageRootLabel(root)}, ${humanSize(root.freeSpace)} free"
+            block.setOnClickListener { navigateMain(root) }
+            block.addView(termRow(listOf(termGlyph("\uF0A0") to 22, termText(storageRootLabel(root)) to 0), heightDp = 22))
+            block.addView(termText(termMeter(used, total, 12)), LinearLayout.LayoutParams(-1, dp(22)))
+            block.addView(termText("${humanSize(used)} used / ${humanSize(total)}", dim = true), LinearLayout.LayoutParams(-1, dp(22)))
+            panel.body.addView(block, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
         }
-        addHomeRow(panel, "Recently deleted", "${trashFileCount()} items", "") { showRecentlyDeleted() }
-        return panel
+        val trash = LinearLayout(this)
+        trash.orientation = LinearLayout.VERTICAL
+        trash.background = termPressable()
+        val items = trashFileCount()
+        trash.contentDescription = "Trash, $items items"
+        trash.setOnClickListener { showRecentlyDeleted() }
+        trash.addView(termRow(listOf(termGlyph("\uF1F8") to 22, termText("Trash") to 0), heightDp = 22))
+        trash.addView(termText("$items items", dim = true), LinearLayout.LayoutParams(-1, dp(22)))
+        panel.body.addView(trash, LinearLayout.LayoutParams(-1, -2))
+        return panel.root
     }
 
-    private fun homePanel(title: String): LinearLayout {
-        val panel = LinearLayout(this)
-        panel.orientation = LinearLayout.VERTICAL
-        panel.setPadding(dp(10), dp(8), dp(10), dp(10))
-        panel.background = panelDrawable(PanelRole.OUTPUT)
-        val heading = label(title, max(10, outputTextSizeSp - 1), true)
-        heading.gravity = Gravity.START or Gravity.CENTER_VERTICAL
-        heading.setTextColor(moduleTextColor)
-        panel.addView(heading, LinearLayout.LayoutParams(-1, dp(24)))
-        return panel
+    private fun buildPlacesSection(): View {
+        val panel = termPanel("PLACES", "bookmarks", "edit")
+        (panel.tab.parent as View).apply {
+            background = termPressable()
+            contentDescription = "Edit bookmarks"
+            setOnClickListener { showBookmarkMenu() }
+        }
+        for (entry in placeEntries(includeRecent = false).filterNot { it.isSection }) {
+            val file = entry.file
+            val uri = entry.contentUri
+            val path = when {
+                entry.isTrashPlace -> "trash"
+                file != null -> tildePath(file)
+                else -> "provider"
+            }
+            val action: () -> Unit = when {
+                entry.isTrashPlace -> ({ showTrashContents() })
+                file != null -> ({ navigateMain(file) })
+                uri != null -> ({ openProviderRoot(uri) })
+                else -> ({ })
+            }
+            val name = entry.label.removePrefix("Provider: ")
+            val row = termRow(listOf(
+                termGlyph(placeGlyph(name, entry.isTrashPlace, file == null && uri != null)) to 26,
+                termText(name) to 0,
+                termText(path, dim = true).apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL } to 150
+            ), action = action)
+            row.contentDescription = "$name, $path"
+            panel.body.addView(row)
+        }
+        return panel.root
     }
 
-    private fun addCategoryTile(parent: LinearLayout?, category: FileCategory, count: Int?) {
-        if (parent == null) return
-        val tile = LinearLayout(this)
-        tile.orientation = LinearLayout.VERTICAL
-        tile.gravity = Gravity.CENTER
-        tile.setPadding(dp(3), dp(5), dp(3), dp(4))
-        tile.background = functionButtonBackground()
-        tile.setOnClickListener { showCategoryFiles(category) }
-        tile.addView(glyphView(category.glyph, moduleButtonTextColor, max(22, outputTextSizeSp + 8)), LinearLayout.LayoutParams(-1, dp(28)))
-        val name = label(category.label, max(10, outputTextSizeSp - 2), true)
-        name.gravity = Gravity.CENTER
-        name.setTextColor(moduleButtonTextColor)
-        tile.addView(name, LinearLayout.LayoutParams(-1, dp(22)))
-        val value = label(count?.toString() ?: "...", max(9, outputTextSizeSp - 3), false)
-        value.gravity = Gravity.CENTER
-        value.setTextColor(withAlpha(moduleButtonTextColor, 185))
-        categoryCountViews[category.label] = value
-        tile.addView(value, LinearLayout.LayoutParams(-1, dp(18)))
-        val params = LinearLayout.LayoutParams(0, -1, 1f)
-        params.setMargins(dp(3), dp(3), dp(3), dp(3))
-        parent.addView(tile, params)
+    private fun buildNewestSection(): View {
+        val panel = termPanel("NEW", "latest files", "…")
+        val loadVersion = homeCountVersion
+        Thread {
+            val files = newestFiles(HOME_NEWEST_ROWS)
+            runOnUiThread {
+                if (currentScreen != Screen.HOME || loadVersion != homeCountVersion) return@runOnUiThread
+                panel.meta.text = if (files.isEmpty()) "none" else "0:${files.size}"
+                fun right(view: TextView) = view.apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
+                for ((file, uri) in files) {
+                    val row = termRow(listOf(
+                        termGlyph(nameGlyph(file.name)) to 26, termText(file.name) to 0,
+                        right(termText(humanSize(file.length()))) to 64,
+                        right(termText(shortDate(file.lastModified()))) to 64
+                    )) { openFile(file, uri) }
+                    row.contentDescription = "Open ${file.name}"
+                    panel.body.addView(row)
+                }
+            }
+        }.start()
+        return panel.root
     }
 
-    private fun addHomeRow(parent: LinearLayout, title: String, subtitle: String, glyph: String, action: () -> Unit) {
-        val row = LinearLayout(this)
-        row.orientation = LinearLayout.HORIZONTAL
-        row.gravity = Gravity.CENTER_VERTICAL
-        row.setPadding(dp(6), 0, dp(6), 0)
-        row.background = functionButtonBackground()
-        row.setOnClickListener { action() }
-        row.addView(glyphView(glyph, moduleButtonTextColor, max(16, outputTextSizeSp + 2)), LinearLayout.LayoutParams(dp(34), -1))
-        val text = LinearLayout(this)
-        text.orientation = LinearLayout.VERTICAL
-        text.gravity = Gravity.CENTER_VERTICAL
-        val top = label(title, outputTextSizeSp, true)
-        top.gravity = Gravity.START or Gravity.BOTTOM
-        top.setTextColor(moduleButtonTextColor)
-        val bottom = label(subtitle, max(9, outputTextSizeSp - 3), false)
-        bottom.gravity = Gravity.START or Gravity.TOP
-        bottom.setTextColor(withAlpha(moduleButtonTextColor, 175))
-        text.addView(top, LinearLayout.LayoutParams(-1, dp(24)))
-        text.addView(bottom, LinearLayout.LayoutParams(-1, dp(18)))
-        row.addView(text, LinearLayout.LayoutParams(0, -1, 1f))
-        val arrow = label(">", outputTextSizeSp, true)
-        arrow.gravity = Gravity.CENTER
-        arrow.setTextColor(moduleButtonTextColor)
-        row.addView(arrow, LinearLayout.LayoutParams(dp(20), -1))
-        val params = LinearLayout.LayoutParams(-1, dp(54))
-        params.topMargin = dp(6)
-        parent.addView(row, params)
+    /** Newest visible files across storage, straight from MediaStore so it stays cheap. */
+    private fun newestFiles(limit: Int): List<Pair<File, Uri>> {
+        if (!hasStorageAccess()) return emptyList()
+        val out = ArrayList<Pair<File, Uri>>()
+        try {
+            contentResolver.query(
+                filesUri,
+                arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DATA),
+                "${MediaStore.MediaColumns.MIME_TYPE} IS NOT NULL AND ${MediaStore.MediaColumns.DATA} NOT LIKE ?",
+                arrayOf("%/.%"),
+                "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+            )?.use { cursor ->
+                while (cursor.moveToNext() && out.size < limit) {
+                    val file = File(cursor.getString(1) ?: continue)
+                    if (file.isFile && !isUnderTrash(file)) out.add(file to ContentUris.withAppendedId(filesUri, cursor.getLong(0)))
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return out
     }
 
     private fun sectionParams(): LinearLayout.LayoutParams {
@@ -1901,8 +2288,9 @@ open class MainActivity : Activity() {
                 categoryCountCache.clear()
                 categoryCountCache.putAll(counts)
                 for ((label, count) in counts) {
-                    categoryCountViews[label]?.text = count.toString()
+                    categoryCountViews[label]?.text = compactCount(count)
                 }
+                updateCategoryBars()
             }
         }.start()
     }
@@ -2109,8 +2497,9 @@ open class MainActivity : Activity() {
             commanderSkin?.style("core", if (activePanel == Panel.RIGHT) "reverse" else "frame")?.displayed?.let { styleCommanderText(this, it, background = true) }
         }
         renderBreadcrumbs()
+        updateTermHeader()
         if (compactLayout() && actionBarScreen != currentScreen) updateFunctionBar()
-        commandLineView?.text = "$ " + if (currentScreen == Screen.HOME) "Command…" else "${abbreviatePath(rightPane.directory.absolutePath)} › Command…"
+        commandLineView?.text = if (currentScreen == Screen.HOME) "cd · ls · find · open" else "${tildePath(rightPane.directory)}  › command…"
     }
 
     private fun renderActivePane() {
@@ -2139,6 +2528,10 @@ open class MainActivity : Activity() {
         footer?.text = selected
         footer?.contentDescription = "$selected. ${paneSummary(pane)}"
         disk?.text = if (panel == Panel.LEFT) "${pane.rows.count { it.isDirectory && !it.isParent }} dirs" else diskSummary(pane.directory)
+        if (panel == Panel.RIGHT) {
+            updateTermFooter()
+            updateTermHeader()
+        }
     }
 
     /** Returns true when a saved scroll position was restored instead of scrolling to the cursor. */
@@ -2176,31 +2569,27 @@ open class MainActivity : Activity() {
 
     private class FileRowHolder(val prefix: TextView, val label: TextView, val size: TextView, val date: TextView, val dateDivider: View)
 
-    private class CompactRowHolder(val type: TextView, val label: TextView, val meta: TextView)
+    private class CompactRowHolder(val mark: TextView, val icon: TextView, val label: TextView, val size: TextView, val date: TextView)
 
+    /** One mc-style line per entry: mark, name (folders start with /), size, modified. */
     private fun newCompactRow(): LinearLayout {
         val cell = LinearLayout(this)
         cell.id = R.id.fm_file_row
         cell.orientation = LinearLayout.HORIZONTAL
         cell.gravity = Gravity.CENTER_VERTICAL
-        cell.minimumHeight = dp(56)
-        cell.setPadding(dp(4), dp(6), dp(8), dp(6))
-        val type = label("", max(10, outputTextSizeSp - 1), true)
-        type.gravity = Gravity.CENTER
-        cell.addView(type, LinearLayout.LayoutParams(dp(52), -2))
-        val text = LinearLayout(this)
-        text.orientation = LinearLayout.VERTICAL
-        val name = label("", outputTextSizeSp, false)
-        name.setSingleLine(false)
-        name.maxLines = 2
-        name.ellipsize = TextUtils.TruncateAt.END
-        text.addView(name, LinearLayout.LayoutParams(-1, -2))
-        val meta = label("", max(10, outputTextSizeSp - 2), false)
-        meta.ellipsize = TextUtils.TruncateAt.END
-        text.addView(meta, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(3) })
-        cell.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
-        cell.layoutParams = AbsListView.LayoutParams(-1, -2)
-        cell.tag = CompactRowHolder(type, name, meta)
+        cell.setPadding(dp(6), 0, dp(6), 0)
+        val mark = termText("").apply { setPadding(dp(4), 0, 0, 0) }
+        cell.addView(mark, LinearLayout.LayoutParams(dp(TERM_MARK_DP + 8), -1))
+        val icon = termGlyph("")
+        cell.addView(icon, LinearLayout.LayoutParams(dp(TERM_ICON_DP), -1))
+        val name = termText("").apply { setPadding(dp(4), 0, dp(4), 0) }
+        cell.addView(name, LinearLayout.LayoutParams(0, -1, 1f))
+        val size = termText("").apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL; setPadding(0, 0, dp(4), 0) }
+        cell.addView(size, LinearLayout.LayoutParams(dp(TERM_SIZE_DP), -1))
+        val date = termText("").apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL; setPadding(0, 0, dp(4), 0) }
+        cell.addView(date, LinearLayout.LayoutParams(dp(TERM_DATE_DP), -1))
+        cell.layoutParams = AbsListView.LayoutParams(-1, dp(TERM_ROW_DP))
+        cell.tag = CompactRowHolder(mark, icon, name, size, date)
         return cell
     }
 
@@ -2209,35 +2598,38 @@ open class MainActivity : Activity() {
         val cursor = pendingCopyPaths.isEmpty() && pendingMovePaths.isEmpty() &&
             cursorFromKeys && showRightCursorHighlight && activePanel == Panel.RIGHT && index == rightPane.cursor
         val selected = marked || selectedPaths.isEmpty() && cursor
-        val color = rowTextColor(selected, entry.isDirectory)
-        cell.background = rowSelectionBackground(selected)
+        val message = entry.file == null && entry.providerItem == null && entry.archivePath == null && !entry.isParent
+        val color = if (message) termDim() else rowTextColor(selected, entry.isDirectory)
+        cell.background = if (selected) ColorDrawable(selectionBgColor or 0xff000000.toInt()) else termPressable()
         val holder = cell.tag as CompactRowHolder
-        holder.type.text = if (marked) "[ * ]" else fileTypeTag(entry)
-        holder.label.text = if (entry.isParent) ".. (up one folder)" else entry.label
+        holder.mark.text = if (marked) "*" else ""
+        holder.icon.text = if (entry.isSection || message) "" else entryGlyph(entry)
+        holder.label.text = when {
+            entry.isParent -> ".."
+            else -> entry.label
+        }
         holder.label.setTypeface(appTypeface ?: Typeface.MONOSPACE, if (entry.isDirectory) Typeface.BOLD else Typeface.NORMAL)
-        val modified = entry.file?.lastModified() ?: entry.providerItem?.modified ?: entry.modified
-        val date = if (modified > 0) java.text.SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()).format(java.util.Date(modified)) else ""
-        val size = when {
-            entry.isParent || entry.isSection -> ""
-            entry.isDirectory && entry.file != null -> folderItemCount(entry.file)
-            entry.isDirectory -> "Folder"
+        holder.size.text = when {
+            entry.isParent -> "UP--DIR"
+            entry.isSection || message -> ""
+            entry.isDirectory -> "<DIR>"
             entry.file != null -> humanSize(entry.file.length())
             entry.providerItem != null || entry.archivePath != null -> humanSize(entry.size)
             else -> ""
         }
-        holder.meta.text = listOf(size, date).filter { it.isNotEmpty() }.joinToString(" · ")
-        holder.meta.visibility = if (holder.meta.text.isEmpty()) View.GONE else View.VISIBLE
-        listOf(holder.type, holder.label).forEach { it.setTextColor(color) }
-        holder.meta.setTextColor(if (selected) selectionTextColor else withAlpha(color, 170))
+        val modified = entry.file?.lastModified() ?: entry.providerItem?.modified ?: entry.modified
+        holder.date.text = if (entry.isParent) "" else shortDate(modified)
+        listOf(holder.mark, holder.icon, holder.label, holder.size).forEach { it.setTextColor(color) }
+        holder.date.setTextColor(if (selected) selectionTextColor else withAlpha(color, 170))
         commanderFileStyle(entry, marked, cursor)?.let { style ->
             cell.setBackgroundColor(style.background)
-            listOf(holder.type, holder.label).forEach { styleCommanderText(it, style) }
-            holder.meta.setTextColor(withAlpha(holder.label.currentTextColor, 170))
+            listOf(holder.mark, holder.label, holder.size, holder.date).forEach { styleCommanderText(it, style) }
+            holder.icon.setTextColor(holder.label.currentTextColor)
         }
         cell.contentDescription = when {
             entry.isParent -> "Parent folder"
-            entry.isDirectory -> "Folder ${entry.label}, ${holder.meta.text}"
-            else -> "File ${entry.label}, ${holder.meta.text}"
+            entry.isDirectory -> "Folder ${entry.label}"
+            else -> "File ${entry.label}, ${holder.size.text}, ${holder.date.text}"
         } + if (marked) ", marked" else ""
     }
 
@@ -3386,6 +3778,7 @@ open class MainActivity : Activity() {
         }
         try {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                requestNotificationPermissionOnce()
                 ContextCompat.startForegroundService(this, intent)
             } else {
                 startService(intent)
@@ -3393,7 +3786,7 @@ open class MainActivity : Activity() {
         } catch (error: Exception) {
             if (showInline) {
                 activeOperationId = null
-                activeTransferStatus = null
+                clearJob()
                 paneDialog?.dismiss()
             }
             showOutput(if (move) "MOVE" else "COPY", "Could not start operation: ${error.message}")
@@ -3427,6 +3820,7 @@ open class MainActivity : Activity() {
         }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                requestNotificationPermissionOnce()
                 ContextCompat.startForegroundService(this, intent)
             } else {
                 startService(intent)
@@ -3434,7 +3828,7 @@ open class MainActivity : Activity() {
         } catch (error: Exception) {
             if (showInline) {
                 activeOperationId = null
-                activeTransferStatus = null
+                clearJob()
                 activeOperationLabel = "OPERATION"
                 paneDialog?.dismiss()
             }
@@ -3472,6 +3866,7 @@ open class MainActivity : Activity() {
         }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                requestNotificationPermissionOnce()
                 ContextCompat.startForegroundService(this, intent)
             } else {
                 startService(intent)
@@ -3480,7 +3875,7 @@ open class MainActivity : Activity() {
             val operationLabel = activeOperationLabel
             if (showInline) {
                 activeOperationId = null
-                activeTransferStatus = null
+                clearJob()
                 activeOperationLabel = "OPERATION"
                 paneDialog?.dismiss()
             }
@@ -5307,7 +5702,9 @@ open class MainActivity : Activity() {
     }
 
     private fun styleCommanderText(view: TextView, style: CommanderStyle, background: Boolean = false) {
-        view.setTextColor(style.foreground)
+        // MC skins were tuned for 16-colour terminals; some pairs (cyan on cream, magenta on blue) blur on a phone.
+        val surface = if (Color.alpha(style.background) == 0xff) style.background else termPaper()
+        view.setTextColor(Readability.ensureContrast(style.foreground or 0xff000000.toInt(), surface, Readability.TEXT))
         if (background) view.setBackgroundColor(style.background)
         val bold = "bold" in style.attributes
         val italic = "italic" in style.attributes
@@ -5611,6 +6008,27 @@ open class MainActivity : Activity() {
                 "Use right pane as main" to { navigateMain(rightPane.directory) }
             )
         )
+    }
+
+    private fun showBookmarkMenu() {
+        val items = mutableListOf<Pair<String, () -> Unit>>()
+        val placed = placeEntries(includeRecent = false).mapNotNull { it.file?.absolutePath }.toSet()
+        val candidates = NavigationStateStore.recent(themePrefs()).filterNot { it.absolutePath in placed }
+        if (candidates.isNotEmpty()) {
+            items += "Bookmark a recent folder" to {
+                showActionMenu("Bookmark folder", candidates.map { folder -> tildePath(folder) to { addPlace(folder) } })
+            }
+        }
+        if (customPlacePaths().isNotEmpty()) {
+            items += "Remove a bookmark" to {
+                showActionMenu("Remove bookmark", customPlacePaths().map { path ->
+                    tildePath(File(path)) to { removePlace(path) }
+                })
+            }
+        }
+        items += "Add storage provider" to { pickProviderRoot() }
+        items += "Tip: long-press any folder › Add to Places" to { }
+        showActionMenu("Bookmarks", items)
     }
 
     private fun showPlacesMenu() {
@@ -6733,6 +7151,55 @@ open class MainActivity : Activity() {
 
     private enum class PanelRole { OUTER, HEADER, OUTPUT, MODULE, INPUT }
 
+    private data class JobStatus(val completed: Int, val total: Int, val message: String, val completedBytes: Long, val totalBytes: Long)
+
+    /** Square panel with one cut corner, like the Launcher home's TERM panels. */
+    private class TermPanelDrawable(fill: Int, line: Int, strokePx: Float, private val cutPx: Float) : Drawable() {
+        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = fill }
+        private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = strokePx
+            strokeJoin = Paint.Join.MITER
+            color = line
+        }
+        private val path = Path()
+
+        override fun draw(canvas: Canvas) {
+            val b = bounds
+            if (b.isEmpty) return
+            val half = linePaint.strokeWidth / 2f
+            val left = b.left + half
+            val top = b.top + half
+            val right = b.right - half
+            val bottom = b.bottom - half
+            val cut = min(cutPx, min(b.width(), b.height()) / 3f)
+            path.reset()
+            path.moveTo(left, top)
+            path.lineTo(right, top)
+            path.lineTo(right, bottom - cut)
+            path.lineTo(right - cut, bottom)
+            path.lineTo(left, bottom)
+            path.close()
+            canvas.drawPath(path, fillPaint)
+            canvas.drawPath(path, linePaint)
+        }
+
+        override fun setAlpha(alpha: Int) {
+            fillPaint.alpha = alpha
+            linePaint.alpha = alpha
+            invalidateSelf()
+        }
+
+        override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {
+            fillPaint.colorFilter = colorFilter
+            linePaint.colorFilter = colorFilter
+            invalidateSelf()
+        }
+
+        @Deprecated("Deprecated in Java")
+        override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
+    }
+
     private class CyberPanelDrawable(
         fillColor: Int,
         borderColor: Int,
@@ -6890,7 +7357,13 @@ open class MainActivity : Activity() {
         private const val FEEDBACK_URL = "https://github.com/DvilSpawn/Re-TUI-FM/issues/new"
         private const val PRIVACY_URL = "https://github.com/DvilSpawn/Re-TUI-FM/blob/master/docs/privacy.html"
         private const val FILE_ROW_HEIGHT_DP = 32
+        private const val TERM_ROW_DP = 30
+        private const val TERM_MARK_DP = 18
+        private const val TERM_ICON_DP = 22
+        private const val TERM_SIZE_DP = 64
+        private const val TERM_DATE_DP = 64
         private const val CATEGORY_FIRST_PAGE_ROWS = 90
+        private const val HOME_NEWEST_ROWS = 8
         private const val TRASH_DIR_NAME = ".retui-trash"
         private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "bmp", "avif")
         private val VIDEO_EXTENSIONS = setOf("mp4", "mkv", "mov", "avi", "webm", "3gp", "m4v")
